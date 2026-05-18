@@ -113,6 +113,7 @@ def main_kb(role):
     if role=="admin":
         kb.add("📈 Umumiy stat","🛍 Mahsulotlar")
         kb.add("👥 Mijozlar bazasi","👤 Agent boshqaruv")
+        kb.add("📢 Xabar yuborish")
     return kb
 def cancel_kb():
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -140,6 +141,15 @@ def viloyat_kb():
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=3)
     kb.add("Namangan","Farg'ona","Andijon"); kb.add("❌ Bekor qilish"); return kb
 
+# ── GLOBAL CANCEL — must be the FIRST handler registered ─────
+@bot.message_handler(func=lambda m:m.text=="❌ Bekor qilish")
+def cancel_h(msg):
+    uid=msg.from_user.id; clear_state(uid); user=get_user(uid)
+    if user:
+        bot.send_message(uid,"❌ Bekor qilindi.",reply_markup=main_kb(user[3]))
+    else:
+        bot.send_message(uid,"❌ Bekor qilindi.",reply_markup=types.ReplyKeyboardRemove())
+
 @bot.message_handler(commands=["start"])
 def cmd_start(msg):
     uid=msg.from_user.id; user=get_user(uid)
@@ -158,7 +168,6 @@ def reg_name(msg):
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="reg_viloyat")
 def reg_viloyat(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
-    if msg.text=="❌ Bekor qilish": clear_state(uid); return
     conn=get_db();c=conn.cursor()
     c.execute("INSERT OR IGNORE INTO users (telegram_id,name,role,viloyat,created_at) VALUES (?,?,?,?,?)",
               (uid,data["name"],"pending",msg.text,datetime.now().isoformat()))
@@ -504,11 +513,6 @@ def del_prod(msg):
         conn.commit();conn.close()
         bot.send_message(msg.from_user.id,f"✅ #{mid} o'chirildi.")
     except: bot.send_message(msg.from_user.id,"❗ /delproduct 1")
-
-@bot.message_handler(func=lambda m:m.text=="❌ Bekor qilish")
-def cancel_h(msg):
-    uid=msg.from_user.id; clear_state(uid); user=get_user(uid)
-    if user: bot.send_message(uid,"Bekor qilindi.",reply_markup=main_kb(user[3]))
 
 @bot.message_handler(func=lambda m:m.text=="🏪 Yangi dokon")
 def yangi_dokon(msg):
@@ -1404,6 +1408,76 @@ def _agent_batafsil(uid,agent_id,agent_name):
     for oy,summa,n in oylar: text+=f"  • {oy}: {fmt(summa)} ({n} ta)\n"
     if not oylar: text+="  — Savdo yo'q\n"
     bot.send_message(uid,text)
+
+# ── BROADCAST ────────────────────────────────────────────────
+def _broadcast_audience_kb():
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+    kb.add("👥 Barcha agentlarga")
+    kb.add("🏪 Barcha dokon egalariga")
+    kb.add("👤 Hammaga (agentlar + egalar)")
+    kb.add("❌ Bekor qilish")
+    return kb
+
+@bot.message_handler(func=lambda m:m.text=="📢 Xabar yuborish")
+def broadcast_start(msg):
+    uid=msg.from_user.id
+    if not is_admin(uid): return
+    set_state(uid,"broadcast_audience",{})
+    bot.send_message(uid,"📢 Kimga yubormoqchisiz?",reply_markup=_broadcast_audience_kb())
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="broadcast_audience")
+def s_broadcast_audience(msg):
+    uid=msg.from_user.id
+    options={"👥 Barcha agentlarga","🏪 Barcha dokon egalariga","👤 Hammaga (agentlar + egalar)"}
+    if msg.text not in options: return
+    set_state(uid,"broadcast_text",{"audience":msg.text})
+    bot.send_message(uid,
+        f"✏️ Xabar matnini yozing:\n_(u yuboriladi: {msg.text})_",
+        reply_markup=cancel_kb())
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="broadcast_text",
+                     content_types=["text","photo","document","video","audio"])
+def s_broadcast_text(msg):
+    uid=msg.from_user.id; data=get_state(uid)["data"]
+    audience=data["audience"]; clear_state(uid)
+    conn=get_db();c=conn.cursor()
+
+    recipients=set()
+    if audience in("👥 Barcha agentlarga","👤 Hammaga (agentlar + egalar)"):
+        c.execute("SELECT telegram_id FROM users WHERE role IN ('agent','supervisor')")
+        for r in c.fetchall(): recipients.add(r[0])
+    if audience in("🏪 Barcha dokon egalariga","👤 Hammaga (agentlar + egalar)"):
+        c.execute("SELECT DISTINCT owner_telegram_id FROM dokonlar WHERE owner_telegram_id IS NOT NULL")
+        for r in c.fetchall(): recipients.add(r[0])
+    conn.close()
+
+    if not recipients:
+        bot.send_message(uid,"❗ Yuborish uchun foydalanuvchi topilmadi.",reply_markup=main_kb("admin")); return
+
+    bot.send_message(uid,f"⏳ {len(recipients)} ta foydalanuvchiga yuborilmoqda...")
+
+    ok=0; fail=0
+    for tid in recipients:
+        if tid==uid: continue
+        try:
+            if msg.content_type=="text":
+                bot.send_message(tid,msg.text)
+            elif msg.content_type=="photo":
+                bot.send_photo(tid,msg.photo[-1].file_id,caption=msg.caption or "")
+            elif msg.content_type=="document":
+                bot.send_document(tid,msg.document.file_id,caption=msg.caption or "")
+            elif msg.content_type=="video":
+                bot.send_video(tid,msg.video.file_id,caption=msg.caption or "")
+            elif msg.content_type=="audio":
+                bot.send_audio(tid,msg.audio.file_id,caption=msg.caption or "")
+            ok+=1
+        except: fail+=1
+
+    report=(f"📢 Xabar yuborish yakunlandi!\n{'━'*26}\n"
+            f"✅ Muvaffaqiyatli: {ok} ta\n"
+            f"❌ Xato (blok/o'chgan): {fail} ta\n"
+            f"👤 Jami: {ok+fail} ta")
+    bot.send_message(uid,report,reply_markup=main_kb("admin"))
 
 def _davr_kb():
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
