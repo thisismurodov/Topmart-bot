@@ -162,12 +162,23 @@ def cmd_start(msg):
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="reg_name")
 def reg_name(msg):
     uid=msg.from_user.id
+    existing=get_user(uid)
+    if existing:
+        clear_state(uid)
+        bot.send_message(uid,f"✅ Xush kelibsiz, {existing[2]}!",reply_markup=main_kb(existing[3])); return
     set_state(uid,"reg_viloyat",{"name":msg.text.strip()})
     bot.send_message(uid,"📍 Viloyatingizni tanlang:",reply_markup=viloyat_kb())
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="reg_viloyat")
 def reg_viloyat(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
+    existing=get_user(uid)
+    if existing:
+        clear_state(uid)
+        bot.send_message(uid,f"✅ Xush kelibsiz, {existing[2]}!",reply_markup=main_kb(existing[3])); return
+    viloyatlar=["Namangan","Farg'ona","Andijon"]
+    if msg.text not in viloyatlar:
+        bot.send_message(uid,"❗ Iltimos ro'yxatdan viloyat tanlang:",reply_markup=viloyat_kb()); return
     conn=get_db();c=conn.cursor()
     c.execute("INSERT OR IGNORE INTO users (telegram_id,name,role,viloyat,created_at) VALUES (?,?,?,?,?)",
               (uid,data["name"],"pending",msg.text,datetime.now().isoformat()))
@@ -2012,4 +2023,4 @@ if __name__=="__main__":
     threading.Thread(target=run_scheduler,daemon=True).start()
     threading.Thread(target=run_health_server,daemon=True).start()
     print("✅ TOP MART bot ishga tushdi!")
-    bot.infinity_polling()
+    bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
