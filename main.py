@@ -14,6 +14,15 @@ ADMIN_IDS = [1261052681]
 
 bot = telebot.TeleBot(TOKEN)
 DB_PATH = os.environ.get("DB_PATH", "/data/topmart.db")
+try:
+    _dbdir = os.path.dirname(DB_PATH)
+    if _dbdir: os.makedirs(_dbdir, exist_ok=True)
+    # test writability
+    with open(DB_PATH + ".write_test", "w") as _f: _f.write("ok")
+    os.remove(DB_PATH + ".write_test")
+except Exception as _e:
+    print(f"⚠️ {DB_PATH} not writable ({_e}). Falling back to topmart.db in current dir.")
+    DB_PATH = "topmart.db"
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
