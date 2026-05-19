@@ -1,3 +1,4 @@
+import os
 import telebot
 from telebot import types
 import sqlite3
@@ -12,7 +13,7 @@ TOKEN = "8968461153:AAETpKpkeupU1XSOa0wEue2QF4MlbmmKMK0"
 ADMIN_IDS = [1261052681]
 
 bot = telebot.TeleBot(TOKEN)
-DB_PATH = "topmart.db"
+DB_PATH = os.environ.get("DB_PATH", "/data/topmart.db")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
