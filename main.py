@@ -74,10 +74,17 @@ def init_db():
         qoldiq INTEGER,
         created_at TEXT, updated_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS mijoz_balans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        dokon_id INTEGER UNIQUE,
+        balans INTEGER DEFAULT 0
+    );
     """)
     conn.commit()
     # Migrations for existing DBs
     try: c.execute("ALTER TABLE dokonlar ADD COLUMN owner_telegram_id INTEGER")
+    except: pass
+    try: c.execute("CREATE TABLE IF NOT EXISTS mijoz_balans (id INTEGER PRIMARY KEY AUTOINCREMENT, dokon_id INTEGER UNIQUE, balans INTEGER DEFAULT 0)")
     except: pass
     conn.commit(); conn.close()
 
@@ -86,6 +93,12 @@ user_state = {}
 def set_state(uid,s,d=None): user_state[uid]={"state":s,"data":d or {}}
 def get_state(uid): return user_state.get(uid,{"state":None,"data":{}})
 def clear_state(uid): user_state.pop(uid,None)
+def get_balans(dokon_id):
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT balans FROM mijoz_balans WHERE dokon_id=?",(dokon_id,))
+    row=c.fetchone(); conn.close(); return row[0] if row else 0
+def update_balans_delta(c,dokon_id,delta):
+    c.execute("INSERT INTO mijoz_balans (dokon_id,balans) VALUES (?,?) ON CONFLICT(dokon_id) DO UPDATE SET balans=balans+?",(dokon_id,delta,delta))
 def get_user(tid):
     conn=get_db();c=conn.cursor()
     c.execute("SELECT * FROM users WHERE telegram_id=?",(tid,))
@@ -781,12 +794,59 @@ def s_aralash_tasdiq(msg):
 @bot.message_handler(content_types=["photo"],func=lambda m:get_state(m.from_user.id)["state"]=="savdo_foto")
 def s_savdo_foto_p(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
-    data["foto"]=msg.photo[-1].file_id; _save_savdo(uid,data)
+    data["foto"]=msg.photo[-1].file_id; _check_balans_before_save(uid,data)
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="savdo_foto")
 def s_savdo_foto_s(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
-    data["foto"]=None; _save_savdo(uid,data)
+    data["foto"]=None; _check_balans_before_save(uid,data)
+
+def _check_balans_before_save(uid,data):
+    did=data["dokon_id"]; tolov=data["tolov"]
+    balans=get_balans(did)
+    if balans>0 and tolov=="nasiya":
+        jami=sum(m[2]*data["tanlangan"].get(m[0],0) for m in data["mahsulotlar"])
+        deducted=min(balans,jami); yangi_balans=balans-deducted
+        conn=get_db();c=conn.cursor()
+        update_balans_delta(c,did,-deducted)
+        conn.commit();conn.close()
+        data["balans_ishlatildi"]=deducted; data["yangi_balans"]=yangi_balans
+        bot.send_message(uid,f"✅ {fmt(deducted)} so'm balans nasiyadan ayirildi.\nQolgan balans: {fmt(yangi_balans)}")
+        _save_savdo(uid,data)
+    elif balans>0 and tolov=="aralash" and data.get("nasiya_qism",0)>0:
+        nas=data["nasiya_qism"]; deducted=min(balans,nas); yangi_balans=balans-deducted
+        conn=get_db();c=conn.cursor()
+        update_balans_delta(c,did,-deducted)
+        conn.commit();conn.close()
+        data["nasiya_qism"]=nas-deducted
+        data["balans_ishlatildi"]=deducted; data["yangi_balans"]=yangi_balans
+        bot.send_message(uid,f"✅ {fmt(deducted)} so'm balans nasiyadan ayirildi.\nQolgan balans: {fmt(yangi_balans)}")
+        _save_savdo(uid,data)
+    elif balans>0 and tolov in("naqd","karta"):
+        data["mavjud_balans"]=balans
+        set_state(uid,"savdo_balans_confirm",data)
+        kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+        kb.add("✅ Ha, ayirish","❌ Yo'q, to'liq to'lov")
+        bot.send_message(uid,
+            f"💰 Bu mijozda {fmt(balans)} so'm ortiqcha pul bor.\n"
+            f"Tovar summasidan ayirilsinmi?",reply_markup=kb)
+    else:
+        _save_savdo(uid,data)
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="savdo_balans_confirm")
+def s_savdo_balans_confirm(msg):
+    uid=msg.from_user.id; data=get_state(uid)["data"]
+    balans=data["mavjud_balans"]
+    if msg.text=="✅ Ha, ayirish":
+        jami=sum(m[2]*data["tanlangan"].get(m[0],0) for m in data["mahsulotlar"])
+        deducted=min(balans,jami); yangi_balans=balans-deducted
+        conn=get_db();c=conn.cursor()
+        update_balans_delta(c,data["dokon_id"],-deducted)
+        conn.commit();conn.close()
+        data["balans_ishlatildi"]=deducted; data["yangi_balans"]=yangi_balans
+        _save_savdo(uid,data)
+    elif msg.text=="❌ Yo'q, to'liq to'lov":
+        _save_savdo(uid,data)
 
 TOLOV_LABEL={"naqd":"💵 Naqd","karta":"💳 Karta","nasiya":"📝 Nasiya","aralash":"🔀 Aralash"}
 
@@ -811,7 +871,8 @@ def _save_savdo(uid,data):
             c.execute("INSERT INTO savdo_tafsilot (savdo_id,mahsulot_id,miqdor,narx,summa) VALUES (?,?,?,?,?)",(sid,mid,miqdor,narx,narx*miqdor))
             lines.append(f"  • {nomi} ×{miqdor} = {fmt(narx*miqdor)}")
     nasiya_summa=0
-    if tolov=="nasiya": nasiya_summa=jami
+    balans_ishlatildi=data.get("balans_ishlatildi",0)
+    if tolov=="nasiya": nasiya_summa=max(0,jami-balans_ishlatildi)
     elif tolov=="aralash": nasiya_summa=data.get("nasiya_qism",0)
     if nasiya_summa>0:
         c.execute("INSERT INTO nasiya (dokon_id,agent_id,savdo_id,jami_summa,tolangan,qoldiq,created_at,updated_at) VALUES (?,?,?,?,0,?,?,?)",
@@ -824,14 +885,20 @@ def _save_savdo(uid,data):
     conn.commit();conn.close();clear_state(uid)
     tolov_str=_tolov_info_str(data)
     foto_id=data.get("foto")
-    bot.send_message(uid,"✅ Savdo saqlandi!\n\n🏪 "+data["dokon_nomi"]+"\n"+"\n".join(lines)+f"\n\n💰 Jami: {fmt(jami)}"+tolov_str,reply_markup=main_kb(user[3]))
+    yangi_balans=data.get("yangi_balans",None)
+    balans_line=""
+    if balans_ishlatildi>0:
+        balans_line=f"\n💰 Balans ishlatildi: -{fmt(balans_ishlatildi)}"
+        if yangi_balans is not None:
+            balans_line+=f"\n💳 Qolgan balans: {fmt(yangi_balans)}"
+    bot.send_message(uid,"✅ Savdo saqlandi!\n\n🏪 "+data["dokon_nomi"]+"\n"+"\n".join(lines)+f"\n\n💰 Jami: {fmt(jami)}"+tolov_str+balans_line,reply_markup=main_kb(user[3]))
     # Admin notification — forward photo if present
     admin_text=(f"📦 Yangi savdo!\n\n"
                 f"👤 Agent: {user[2]}\n"
                 f"📍 Viloyat: {user[4]}\n"
                 f"🏪 Dokon: {data['dokon_nomi']}\n\n"
                 f"🛍 Mahsulotlar:\n"+"\n".join(lines)+
-                f"\n\n💰 Jami: {fmt(jami)}"+tolov_str)
+                f"\n\n💰 Jami: {fmt(jami)}"+tolov_str+balans_line)
     try:
         if foto_id:
             bot.send_photo(1261052681,foto_id,caption=admin_text)
@@ -848,9 +915,12 @@ def _save_savdo(uid,data):
                  f"🏪 Dokon: {data['dokon_nomi']}\n"
                  f"📅 Sana: {now[:10]}\n\n"
                  f"🛍 Mahsulotlar:\n"+"\n".join(lines)+
-                 f"\n\n💰 Jami: {fmt(jami)}"+tolov_str+nasiya_line)
+                 f"\n\n💰 Jami: {fmt(jami)}"+tolov_str+nasiya_line+balans_line)
         try: bot.send_message(owner_tg,receipt)
         except: pass
+        if balans_ishlatildi>0:
+            try: bot.send_message(owner_tg,f"✅ {fmt(balans_ishlatildi)} so'm balans ishlatildi.\nQolgan balans: {fmt(yangi_balans or 0)}")
+            except: pass
 
 @bot.message_handler(func=lambda m:m.text=="💰 Pul olish")
 def pul_olish(msg):
@@ -914,9 +984,16 @@ def s_pul_nasiya_summa(msg):
         if summa<=0: raise ValueError
     except: bot.send_message(uid,"❗ Musbat raqam kiriting:"); return
     did=data["dokon_id"]; dnomi=data["dokon_nomi"]; nasiya_qoldiq=data["nasiya_qoldiq"]
-    now=datetime.now().isoformat()
-    pay_amount=min(summa,nasiya_qoldiq)
-    remaining=pay_amount
+    if summa>nasiya_qoldiq:
+        ortiqcha=summa-nasiya_qoldiq
+        data["ortiqcha_summa"]=summa; data["ortiqcha_diff"]=ortiqcha
+        set_state(uid,"pul_nasiya_ortiqcha_confirm",data)
+        kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+        kb.add("✅ Tasdiqlash","✏️ Summani to'g'irlash")
+        bot.send_message(uid,
+            f"⚠️ Siz {fmt(nasiya_qoldiq)}ga qarshi {fmt(summa)} kiritdingiz.\n"
+            f"{fmt(ortiqcha)} so'm ORTIQCHA.\n\nTasdiqlaysizmi?",reply_markup=kb); return
+    now=datetime.now().isoformat(); remaining=summa
     conn=get_db();c=conn.cursor()
     c.execute("SELECT id,qoldiq FROM nasiya WHERE dokon_id=? AND agent_id=? AND qoldiq>0 ORDER BY created_at",(did,uid))
     for nid,qoldiq in c.fetchall():
@@ -926,13 +1003,13 @@ def s_pul_nasiya_summa(msg):
         remaining-=pay
     c.execute("INSERT INTO pul_olish (dokon_id,agent_id,summa,created_at) VALUES (?,?,?,?)",(did,uid,summa,now))
     conn.commit(); conn.close(); clear_state(uid)
-    yangi_qoldiq=nasiya_qoldiq-pay_amount
+    yangi_qoldiq=nasiya_qoldiq-summa
     nasiya_status="✅ Nasiya to'liq to'landi!" if yangi_qoldiq<=0 else f"🔴 Qolgan nasiya: {fmt(yangi_qoldiq)}"
     bot.send_message(uid,
         f"✅ Pul olish saqlandi!\n\n"
         f"🏪 {dnomi}\n"
         f"💵 Olingan summa: {fmt(summa)}\n"
-        f"💳 Nasiyaga hisoblandi: {fmt(pay_amount)}\n"
+        f"💳 Nasiyaga hisoblandi: {fmt(summa)}\n"
         f"{nasiya_status}",
         reply_markup=main_kb(user[3]))
     try:
@@ -941,9 +1018,55 @@ def s_pul_nasiya_summa(msg):
             f"👤 Agent: {user[2]}\n📍 {user[4]}\n"
             f"🏪 Dokon: {dnomi}\n"
             f"💵 Summa: {fmt(summa)}\n"
-            f"💳 Nasiyaga: {fmt(pay_amount)}\n"
+            f"💳 Nasiyaga: {fmt(summa)}\n"
             f"🔴 Qoldiq: {fmt(yangi_qoldiq)}")
     except: pass
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="pul_nasiya_ortiqcha_confirm")
+def s_pul_nasiya_ortiqcha_confirm(msg):
+    uid=msg.from_user.id; user=get_user(uid); data=get_state(uid)["data"]
+    if msg.text=="✏️ Summani to'g'irlash":
+        set_state(uid,"pul_nasiya_summa",data)
+        bot.send_message(uid,
+            f"🏪 {data['dokon_nomi']}\n"
+            f"🔴 Nasiya qoldiq: {fmt(data['nasiya_qoldiq'])}\n\n"
+            f"Qancha pul oldingiz?",reply_markup=cancel_kb()); return
+    if msg.text!="✅ Tasdiqlash": return
+    summa=data["ortiqcha_summa"]; nasiya_qoldiq=data["nasiya_qoldiq"]; ortiqcha=data["ortiqcha_diff"]
+    did=data["dokon_id"]; dnomi=data["dokon_nomi"]
+    now=datetime.now().isoformat(); remaining=nasiya_qoldiq
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT id,qoldiq FROM nasiya WHERE dokon_id=? AND agent_id=? AND qoldiq>0 ORDER BY created_at",(did,uid))
+    for nid,qoldiq in c.fetchall():
+        if remaining<=0: break
+        pay=min(remaining,qoldiq)
+        c.execute("UPDATE nasiya SET tolangan=tolangan+?,qoldiq=qoldiq-?,updated_at=? WHERE id=?",(pay,pay,now,nid))
+        remaining-=pay
+    c.execute("INSERT INTO pul_olish (dokon_id,agent_id,summa,created_at) VALUES (?,?,?,?)",(did,uid,summa,now))
+    update_balans_delta(c,did,ortiqcha)
+    c.execute("SELECT owner_telegram_id FROM dokonlar WHERE id=?",(did,))
+    row=c.fetchone(); owner_tg=row[0] if row else None
+    conn.commit(); conn.close(); clear_state(uid)
+    bot.send_message(uid,
+        f"✅ Pul olish saqlandi!\n\n"
+        f"🏪 {dnomi}\n"
+        f"💵 Olingan summa: {fmt(summa)}\n"
+        f"💳 Nasiyaga hisoblandi: {fmt(nasiya_qoldiq)}\n"
+        f"✅ Nasiya to'liq to'landi!\n"
+        f"💰 Ortiqcha balansga yozildi: +{fmt(ortiqcha)}",
+        reply_markup=main_kb(user[3]))
+    try:
+        bot.send_message(1261052681,
+            f"💰 Pul olindi (ortiqcha)!\n\n"
+            f"👤 Agent: {user[2]}\n📍 {user[4]}\n"
+            f"🏪 Dokon: {dnomi}\n"
+            f"💵 Summa: {fmt(summa)}\n"
+            f"💳 Nasiyaga: {fmt(nasiya_qoldiq)}\n"
+            f"💰 Ortiqcha balans: +{fmt(ortiqcha)}")
+    except: pass
+    if owner_tg:
+        try: bot.send_message(owner_tg,f"💰 Sizda {fmt(ortiqcha)} so'm ortiqcha to'lov bor.\nKeyingi tovardan ayiriladi.")
+        except: pass
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="pul_summa")
 def s_pul_summa(msg):
@@ -1061,13 +1184,20 @@ def s_nasiya_tolov(msg):
         if summa<=0: raise ValueError
     except: bot.send_message(uid,"❗ Musbat raqam kiriting:"); return
     did=data["did"]; dnomi=data["dnomi"]; jami_qoldiq=data["jami_qoldiq"]
-    if summa>jami_qoldiq: summa=jami_qoldiq
+    if summa>jami_qoldiq:
+        ortiqcha=summa-jami_qoldiq
+        data["ortiqcha_summa"]=summa; data["ortiqcha_diff"]=ortiqcha
+        set_state(uid,"nasiya_tolov_ortiqcha_confirm",data)
+        kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+        kb.add("✅ Tasdiqlash","✏️ Summani to'g'irlash")
+        bot.send_message(uid,
+            f"⚠️ Siz {fmt(jami_qoldiq)}ga qarshi {fmt(summa)} kiritdingiz.\n"
+            f"{fmt(ortiqcha)} so'm ORTIQCHA.\n\nTasdiqlaysizmi?",reply_markup=kb); return
     # Apply FIFO: pay off oldest unpaid sales first
     remaining=summa; now=datetime.now().isoformat()
     conn=get_db();c=conn.cursor()
     c.execute("SELECT id,qoldiq FROM nasiya WHERE dokon_id=? AND agent_id=? AND qoldiq>0 ORDER BY created_at",(did,uid))
-    unpaid=c.fetchall()
-    for nid,qoldiq in unpaid:
+    for nid,qoldiq in c.fetchall():
         if remaining<=0: break
         pay=min(remaining,qoldiq)
         c.execute("UPDATE nasiya SET tolangan=tolangan+?,qoldiq=qoldiq-?,updated_at=? WHERE id=?",(pay,pay,now,nid))
@@ -1075,10 +1205,7 @@ def s_nasiya_tolov(msg):
     c.execute("INSERT INTO pul_olish (dokon_id,agent_id,summa,created_at) VALUES (?,?,?,?)",(did,uid,summa,now))
     conn.commit(); conn.close()
     yangi_qoldiq=jami_qoldiq-summa
-    if yangi_qoldiq<=0:
-        status="✅ Barcha qarz to'liq to'landi!"
-    else:
-        status=f"🔴 Qolgan qarz: {fmt(yangi_qoldiq)}"
+    status="✅ Barcha qarz to'liq to'landi!" if yangi_qoldiq<=0 else f"🔴 Qolgan qarz: {fmt(yangi_qoldiq)}"
     bot.send_message(uid,
         f"✅ To'lov qabul qilindi!\n\n"
         f"🏪 {dnomi}\n"
@@ -1094,6 +1221,51 @@ def s_nasiya_tolov(msg):
             f"💵 To'landi: {fmt(summa)}\n"
             f"🔴 Qoldiq: {fmt(yangi_qoldiq)}")
     except: pass
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="nasiya_tolov_ortiqcha_confirm")
+def s_nasiya_tolov_ortiqcha_confirm(msg):
+    uid=msg.from_user.id; user=get_user(uid); data=get_state(uid)["data"]
+    if msg.text=="✏️ Summani to'g'irlash":
+        set_state(uid,"nasiya_tolov",data)
+        bot.send_message(uid,
+            f"🏪 {data['dnomi']}\n🔴 Jami qarz: {fmt(data['jami_qoldiq'])}\n\n"
+            f"Qancha to'lov qabul qildingiz?\n(To'liq: {fmt(data['jami_qoldiq'])})",
+            reply_markup=cancel_kb()); return
+    if msg.text!="✅ Tasdiqlash": return
+    summa=data["ortiqcha_summa"]; jami_qoldiq=data["jami_qoldiq"]; ortiqcha=data["ortiqcha_diff"]
+    did=data["did"]; dnomi=data["dnomi"]
+    now=datetime.now().isoformat(); remaining=jami_qoldiq
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT id,qoldiq FROM nasiya WHERE dokon_id=? AND agent_id=? AND qoldiq>0 ORDER BY created_at",(did,uid))
+    for nid,qoldiq in c.fetchall():
+        if remaining<=0: break
+        pay=min(remaining,qoldiq)
+        c.execute("UPDATE nasiya SET tolangan=tolangan+?,qoldiq=qoldiq-?,updated_at=? WHERE id=?",(pay,pay,now,nid))
+        remaining-=pay
+    c.execute("INSERT INTO pul_olish (dokon_id,agent_id,summa,created_at) VALUES (?,?,?,?)",(did,uid,summa,now))
+    update_balans_delta(c,did,ortiqcha)
+    c.execute("SELECT owner_telegram_id FROM dokonlar WHERE id=?",(did,))
+    row=c.fetchone(); owner_tg=row[0] if row else None
+    conn.commit(); conn.close(); clear_state(uid)
+    bot.send_message(uid,
+        f"✅ To'lov qabul qilindi!\n\n"
+        f"🏪 {dnomi}\n"
+        f"💵 Qabul qilindi: {fmt(summa)}\n"
+        f"✅ Barcha qarz to'liq to'landi!\n"
+        f"💰 Ortiqcha balansga yozildi: +{fmt(ortiqcha)}",
+        reply_markup=main_kb(user[3]))
+    try:
+        bot.send_message(1261052681,
+            f"💳 Nasiya to'lovi (ortiqcha)!\n\n"
+            f"👤 Agent: {user[2]}\n📍 {user[4]}\n"
+            f"🏪 Dokon: {dnomi}\n"
+            f"💵 To'landi: {fmt(summa)}\n"
+            f"✅ Qarz: to'liq to'landi\n"
+            f"💰 Ortiqcha balans: +{fmt(ortiqcha)}")
+    except: pass
+    if owner_tg:
+        try: bot.send_message(owner_tg,f"💰 Sizda {fmt(ortiqcha)} so'm ortiqcha to'lov bor.\nKeyingi tovardan ayiriladi.")
+        except: pass
 
 SABAB_MAP={"💸 Narx qimmat":"narx_qimmat","📦 Hozir tovari bor":"tovari_bor","🏢 Boshqa firma":"boshqa_firma","😕 Sifat yoqmadi":"sifat","🚪 Egasi yo'q edi":"egasi_yoq","🕐 Keyin keling dedi":"keyin_keling","🚫 Sotilmaydi dedi":"sotilmaydi","📝 Boshqa sabab":"boshqa"}
 
@@ -1278,6 +1450,8 @@ def s_admin_dokon_list(msg):
     jami_savdo=c.fetchone()[0]
     c.execute("SELECT COALESCE(SUM(qoldiq),0) FROM nasiya WHERE dokon_id=? AND qoldiq>0",(did,))
     jami_nasiya=c.fetchone()[0]
+    c.execute("SELECT COALESCE(balans,0) FROM mijoz_balans WHERE dokon_id=?",(did,))
+    row2=c.fetchone(); mijoz_bal=row2[0] if row2 else 0
     conn.close()
     _,nomi,egasi,telefon,viloyat,hudud,lat,lon,foto,holat=d
     maps_link=f"https://maps.google.com/?q={lat},{lon}" if lat and lon else None
@@ -1297,6 +1471,8 @@ def s_admin_dokon_list(msg):
     text+=(f"\n{'━'*26}\n"
            f"💰 Jami savdo: {fmt(jami_savdo)}\n"
            f"🔴 Jami nasiya: {fmt(jami_nasiya)}")
+    if mijoz_bal>0:
+        text+=f"\n💰 Mijoz balansi: +{fmt(mijoz_bal)} (ortiqcha to'lov)"
     clear_state(uid)
     back_kb=types.ReplyKeyboardMarkup(resize_keyboard=True)
     back_kb.add("👥 Mijozlar bazasi","❌ Bekor qilish")
@@ -2023,4 +2199,4 @@ if __name__=="__main__":
     threading.Thread(target=run_scheduler,daemon=True).start()
     threading.Thread(target=run_health_server,daemon=True).start()
     print("✅ TOP MART bot ishga tushdi!")
-    bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+    bot.infinity_polling(timeout=30, long_polling_timeout=30)
