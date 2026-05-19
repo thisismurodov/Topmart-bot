@@ -2192,16 +2192,28 @@ def run_health_server():
     from http.server import BaseHTTPRequestHandler, HTTPServer
     class H(BaseHTTPRequestHandler):
         def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-Type","text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK")
+            if self.path in ("/health", "/", "/healthz", "/ping"):
+                self.send_response(200)
+                self.send_header("Content-Type","text/plain")
+                self.end_headers()
+                self.wfile.write(b"OK")
+            else:
+                self.send_response(404)
+                self.end_headers()
         def log_message(self,*a): pass
-    for port in (8443, 9000, 7860, 5050):
+    env_port = os.environ.get("PORT")
+    ports = []
+    if env_port:
+        try: ports.append(int(env_port))
+        except ValueError: pass
+    ports += [8080, 8443, 9000, 7860, 5050]
+    for port in ports:
         try:
+            print(f"🌐 Health server listening on port {port} (/health)")
             HTTPServer(("0.0.0.0", port), H).serve_forever()
             break
-        except OSError:
+        except OSError as e:
+            print(f"⚠️ Port {port} unavailable ({e}), trying next...")
             continue
 
 if __name__=="__main__":
