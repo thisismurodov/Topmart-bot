@@ -329,6 +329,26 @@ def make_adm(msg):
 @bot.message_handler(commands=["myid"])
 def myid(msg): bot.send_message(msg.from_user.id,f"Sizning ID: {msg.from_user.id}")
 
+@bot.message_handler(commands=["eksport","export"])
+def eksport(msg):
+    uid=msg.from_user.id
+    if not is_admin(uid): return
+    import json as _json, datetime as _dt
+    conn=get_db();c=conn.cursor()
+    tables=[r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name!='sqlite_sequence'").fetchall()]
+    dump={"_meta":{"exported_at":_dt.datetime.now().isoformat(),"db_path":DB_PATH,"host":os.uname().nodename}}
+    summary=[]
+    for t in tables:
+        cols=[d[1] for d in c.execute(f"PRAGMA table_info({t})").fetchall()]
+        rows=c.execute(f"SELECT * FROM {t}").fetchall()
+        dump[t]=[dict(zip(cols,r)) for r in rows]
+        summary.append(f"  {t}: {len(rows)} ta")
+    conn.close()
+    data=_json.dumps(dump,ensure_ascii=False,indent=2,default=str).encode("utf-8")
+    fname=f"topmart_backup_{_dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    bio=io.BytesIO(data); bio.name=fname
+    bot.send_document(uid,bio,caption=f"📦 To'liq DB backup\n📁 Host: {dump['_meta']['host']}\n🗄 Path: {DB_PATH}\n\n"+"\n".join(summary))
+
 @bot.message_handler(commands=["agents"])
 def agents_list(msg):
     if not is_admin(msg.from_user.id): return
