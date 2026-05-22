@@ -675,7 +675,10 @@ def tovar_berish(msg):
     if not user: return
     if check_pending(uid): return
     conn=get_db();c=conn.cursor()
-    c.execute("SELECT id,nomi FROM dokonlar WHERE agent_id=? AND holat='faol' ORDER BY nomi",(uid,))
+    if is_admin(uid):
+        c.execute("SELECT id,nomi FROM dokonlar WHERE holat='faol' ORDER BY nomi")
+    else:
+        c.execute("SELECT id,nomi FROM dokonlar WHERE agent_id=? AND holat='faol' ORDER BY nomi",(uid,))
     dokonlar=c.fetchall()
     c.execute("SELECT id,nomi,narx,birlik FROM mahsulotlar WHERE faol=1 ORDER BY nomi")
     mahsulotlar=c.fetchall(); conn.close()
@@ -962,7 +965,10 @@ def pul_olish(msg):
     if not user: return
     if check_pending(uid): return
     conn=get_db();c=conn.cursor()
-    c.execute("SELECT id,nomi FROM dokonlar WHERE agent_id=? AND holat='faol' ORDER BY nomi",(uid,))
+    if is_admin(uid):
+        c.execute("SELECT id,nomi FROM dokonlar WHERE holat='faol' ORDER BY nomi")
+    else:
+        c.execute("SELECT id,nomi FROM dokonlar WHERE agent_id=? AND holat='faol' ORDER BY nomi",(uid,))
     dokonlar=c.fetchall(); conn.close()
     if not dokonlar: bot.send_message(uid,"❗ Faol dokon yo'q."); return
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
@@ -1309,7 +1315,10 @@ def tovar_olmadi(msg):
     if not user: return
     if check_pending(uid): return
     conn=get_db();c=conn.cursor()
-    c.execute("SELECT id,nomi FROM dokonlar WHERE agent_id=? ORDER BY nomi",(uid,))
+    if is_admin(uid):
+        c.execute("SELECT id,nomi FROM dokonlar ORDER BY nomi")
+    else:
+        c.execute("SELECT id,nomi FROM dokonlar WHERE agent_id=? ORDER BY nomi",(uid,))
     dokonlar=c.fetchall(); conn.close()
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
     for d in dokonlar: kb.add(f"🏪 {d[0]}||{d[1]}")
