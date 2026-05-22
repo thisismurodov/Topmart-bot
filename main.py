@@ -9,8 +9,12 @@ import schedule
 import time
 from datetime import datetime, date, timedelta
 
-TOKEN = "8968461153:AAETpKpkeupU1XSOa0wEue2QF4MlbmmKMK0"
-ADMIN_IDS = [1261052681]
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or "8968461153:AAETpKpkeupU1XSOa0wEue2QF4MlbmmKMK0"
+_admin_env = os.environ.get("ADMIN_IDS", "").strip()
+if _admin_env:
+    ADMIN_IDS = [int(x.strip()) for x in _admin_env.replace(";",",").split(",") if x.strip().isdigit()]
+else:
+    ADMIN_IDS = [1261052681]
 
 bot = telebot.TeleBot(TOKEN)
 DB_PATH = os.environ.get("DB_PATH", "/data/topmart.db")
