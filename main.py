@@ -100,6 +100,11 @@ def init_db():
     except: pass
     try: c.execute("ALTER TABLE olmagan_dokonlar ADD COLUMN foto TEXT")
     except: pass
+    # One-time fix: To'lqinjon's viloyat was wrongly set as Farg'ona, should be Namangan
+    try:
+        c.execute("UPDATE dokonlar SET viloyat='Namangan' WHERE agent_id=8577758808 AND viloyat=\"Farg'ona\"")
+        c.execute("UPDATE users SET viloyat='Namangan' WHERE telegram_id=8577758808 AND viloyat=\"Farg'ona\"")
+    except: pass
     try: c.execute("CREATE TABLE IF NOT EXISTS mijoz_balans (id INTEGER PRIMARY KEY AUTOINCREMENT, dokon_id INTEGER UNIQUE, balans INTEGER DEFAULT 0)")
     except: pass
     conn.commit(); conn.close()
