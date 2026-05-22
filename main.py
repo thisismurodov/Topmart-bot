@@ -94,6 +94,8 @@ def init_db():
     # Migrations for existing DBs
     try: c.execute("ALTER TABLE dokonlar ADD COLUMN owner_telegram_id INTEGER")
     except: pass
+    try: c.execute("ALTER TABLE olmagan_dokonlar ADD COLUMN foto TEXT")
+    except: pass
     try: c.execute("CREATE TABLE IF NOT EXISTS mijoz_balans (id INTEGER PRIMARY KEY AUTOINCREMENT, dokon_id INTEGER UNIQUE, balans INTEGER DEFAULT 0)")
     except: pass
     conn.commit(); conn.close()
@@ -1350,6 +1352,13 @@ def s_olmadi_dokon(msg):
 def s_olmadi_yangi_nomi(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
     data["dokon_id"]=None; data["dokon_nomi"]=msg.text.strip()
+    set_state(uid,"olmadi_yangi_egasi",data)
+    bot.send_message(uid,"👤 Egasining ismi:",reply_markup=skip_kb())
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="olmadi_yangi_egasi")
+def s_olmadi_yangi_egasi(msg):
+    uid=msg.from_user.id; data=get_state(uid)["data"]
+    data["egasi"]="" if msg.text=="⏭ O'tkazib yuborish" else msg.text.strip()
     set_state(uid,"olmadi_yangi_tel",data)
     bot.send_message(uid,"📞 Telefon raqami:",reply_markup=skip_kb())
 
@@ -1357,8 +1366,10 @@ def s_olmadi_yangi_nomi(msg):
 def s_olmadi_yangi_tel(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
     data["telefon"]="" if msg.text=="⏭ O'tkazib yuborish" else msg.text.strip()
-    set_state(uid,"olmadi_sabab",data)
-    bot.send_message(uid,"❓ Sababi:",reply_markup=sabab_kb())
+    # Yangi dokon: sabab so'ramaymiz, to'g'ri qaytish sanasiga o'tamiz
+    data["sabab"]="yangi_dokon"; data["sabab_text"]="🆕 Yangi olmagan dokon"
+    set_state(uid,"olmadi_qaytish",data)
+    bot.send_message(uid,"📅 Qaytib kirish sanasi (masalan: 25.05.2026):",reply_markup=cancel_kb())
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="olmadi_sabab")
 def s_olmadi_sabab(msg):
@@ -1366,12 +1377,8 @@ def s_olmadi_sabab(msg):
     sabab=SABAB_MAP.get(msg.text)
     if not sabab: bot.send_message(uid,"❗ Sababni tanlang"); return
     data["sabab"]=sabab; data["sabab_text"]=msg.text
-    if sabab in("egasi_yoq","keyin_keling"):
-        set_state(uid,"olmadi_qaytish",data)
-        bot.send_message(uid,"📅 Qaytib kirish sanasi (25.05.2025):",reply_markup=cancel_kb())
-    else:
-        set_state(uid,"olmadi_location",data)
-        bot.send_message(uid,"📍 Location yuboring:",reply_markup=location_kb())
+    set_state(uid,"olmadi_qaytish",data)
+    bot.send_message(uid,"📅 Qaytib kirish sanasi (masalan: 25.05.2026):",reply_markup=cancel_kb())
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="olmadi_qaytish")
 def s_olmadi_qaytish(msg):
@@ -1384,52 +1391,83 @@ def s_olmadi_qaytish(msg):
 def s_olmadi_loc(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
     data["lat"]=msg.location.latitude; data["lon"]=msg.location.longitude
-    _save_olmadi(uid,data)
+    set_state(uid,"olmadi_foto",data)
+    bot.send_message(uid,"📸 Dokon rasmini yuboring:",reply_markup=skip_kb())
+
+@bot.message_handler(content_types=["photo"],func=lambda m:get_state(m.from_user.id)["state"]=="olmadi_foto")
+def s_olmadi_foto_p(msg):
+    uid=msg.from_user.id; data=get_state(uid)["data"]
+    data["foto"]=msg.photo[-1].file_id
+    _olmadi_confirm(uid,data)
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="olmadi_foto")
+def s_olmadi_foto_s(msg):
+    uid=msg.from_user.id; data=get_state(uid)["data"]
+    if msg.text!="⏭ O'tkazib yuborish": return
+    data["foto"]=None
+    _olmadi_confirm(uid,data)
+
+def _olmadi_confirm(uid,data):
+    set_state(uid,"olmadi_confirm",data)
+    lat=data.get("lat"); lon=data.get("lon")
+    maps_line=f"\n🗺 Location: https://maps.google.com/?q={lat},{lon}" if lat and lon else ""
+    text=(f"📋 TASDIQLANG:\n{'━'*24}\n"
+          f"🏪 Dokon: {data['dokon_nomi']}\n")
+    if data.get("dokon_id") is None:
+        text+=f"👤 Egasi: {data.get('egasi') or '—'}\n📞 Tel: {data.get('telefon') or '—'}\n"
+    text+=(f"❌ Sabab: {data['sabab_text']}\n"
+           f"📅 Qaytish: {data.get('qaytish_sanasi','—')}"
+           f"{maps_line}\n"
+           f"📸 Rasm: {'✅ bor' if data.get('foto') else '—'}\n"
+           f"{'━'*24}\nYubormoqchimisiz?")
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
+    kb.add("✅ Tasdiqlash","❌ Bekor qilish")
+    bot.send_message(uid,text,reply_markup=kb)
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="olmadi_confirm")
+def s_olmadi_confirm(msg):
+    uid=msg.from_user.id; data=get_state(uid)["data"]
+    if msg.text=="✅ Tasdiqlash":
+        _save_olmadi(uid,data)
+    elif msg.text=="❌ Bekor qilish":
+        user=get_user(uid); clear_state(uid)
+        bot.send_message(uid,"❌ Bekor qilindi",reply_markup=main_kb(user[3]))
 
 def _save_olmadi(uid,data):
     user=get_user(uid); conn=get_db(); c=conn.cursor()
     dokon_id=data.get("dokon_id")
     egasi=""; telefon=""
     if dokon_id is None:
-        c.execute("INSERT INTO dokonlar (nomi,egasi,telefon,viloyat,latitude,longitude,agent_id,holat,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                  (data["dokon_nomi"],"",data.get("telefon",""),user[4],data.get("lat"),data.get("lon"),uid,"nofaol",datetime.now().isoformat()))
+        egasi=data.get("egasi",""); telefon=data.get("telefon","")
+        c.execute("INSERT INTO dokonlar (nomi,egasi,telefon,viloyat,latitude,longitude,foto,agent_id,holat,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  (data["dokon_nomi"],egasi,telefon,user[4],data.get("lat"),data.get("lon"),data.get("foto"),uid,"nofaol",datetime.now().isoformat()))
         dokon_id=c.lastrowid
-        telefon=data.get("telefon","")
     else:
         c.execute("SELECT egasi,telefon FROM dokonlar WHERE id=?",(dokon_id,))
         r=c.fetchone()
         if r: egasi,telefon=r[0] or "",r[1] or ""
-    c.execute("INSERT INTO olmagan_dokonlar (dokon_id,agent_id,sabab,sabab_text,latitude,longitude,qaytish_sanasi,created_at) VALUES (?,?,?,?,?,?,?,?)",
-              (dokon_id,uid,data["sabab"],data["sabab_text"],data.get("lat"),data.get("lon"),data.get("qaytish_sanasi"),datetime.now().isoformat()))
+    c.execute("INSERT INTO olmagan_dokonlar (dokon_id,agent_id,sabab,sabab_text,latitude,longitude,qaytish_sanasi,foto,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+              (dokon_id,uid,data["sabab"],data["sabab_text"],data.get("lat"),data.get("lon"),data.get("qaytish_sanasi"),data.get("foto"),datetime.now().isoformat()))
     conn.commit();conn.close();clear_state(uid)
     qaytish=f"\n📅 Qaytish: {data.get('qaytish_sanasi','')}" if data.get("qaytish_sanasi") else ""
     bot.send_message(uid,f"✅ Yozildi!\n🏪 {data['dokon_nomi']}\n❌ {data['sabab_text']}{qaytish}",reply_markup=main_kb(user[3]))
     lat=data.get("lat"); lon=data.get("lon")
     maps_line=f"\n🗺 Location: https://maps.google.com/?q={lat},{lon}" if lat and lon else ""
-    try:
-        if data["sabab"] in("egasi_yoq","keyin_keling"):
-            for aid in ADMIN_IDS:
-                try: bot.send_message(aid,
-                    f"🔔 Qaytib kirish kerak!\n\n"
-                    f"🏪 {data['dokon_nomi']}\n"
-                    f"👤 Egasi: {egasi or '—'}\n"
-                    f"📞 Telefon: {telefon or '—'}"
-                    f"{maps_line}\n"
-                    f"❌ Sabab: {data['sabab_text']}"
-                    f"{qaytish}\n"
-                    f"👤 Agent: {user[2]} | 📍 {user[4]}")
-                except: pass
-        else:
-            for aid in ADMIN_IDS:
-                try: bot.send_message(aid,
-                    f"❌ Tovar olmadi!\n\n"
-                    f"👤 Agent: {user[2]}\n"
-                    f"📍 Viloyat: {user[4]}\n"
-                    f"🏪 Dokon: {data['dokon_nomi']}\n"
-                    f"❓ Sabab: {data['sabab_text']}"
-                    f"{maps_line}")
-                except: pass
-    except: pass
+    caption=(f"🔔 Tovar olmadi / Qaytib kirish\n\n"
+             f"🏪 {data['dokon_nomi']}\n"
+             f"👤 Egasi: {egasi or '—'}\n"
+             f"📞 Tel: {telefon or '—'}"
+             f"{maps_line}\n"
+             f"❌ Sabab: {data['sabab_text']}"
+             f"{qaytish}\n"
+             f"👤 Agent: {user[2]} | 📍 {user[4]}")
+    for aid in ADMIN_IDS:
+        try:
+            if data.get("foto"):
+                bot.send_photo(aid,data["foto"],caption=caption)
+            else:
+                bot.send_message(aid,caption)
+        except: pass
 
 @bot.message_handler(func=lambda m:m.text=="📋 Qaytib kirish kerak")
 def qaytib_kirish(msg):
