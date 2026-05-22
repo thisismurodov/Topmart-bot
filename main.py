@@ -2006,13 +2006,18 @@ def mah_narx_start(msg):
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="mah_narx_tanla")
 def mah_narx_tanla(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
+    if msg.text=="❌ Bekor qilish":
+        user=get_user(uid); clear_state(uid)
+        bot.send_message(uid,"❌ Bekor qilindi",reply_markup=main_kb(user[3])); return
     if not msg.text.startswith("✏️"): return
     try:
-        rest=msg.text[2:]; mid=int(rest.split("|")[0])
-        nomi=rest.split("|")[1].split(" —")[0]
+        rest=msg.text.lstrip("✏️").lstrip()
+        mid=int(rest.split("|")[0])
+        nomi=rest.split("|",1)[1].split(" —")[0].strip()
         data["mid"]=mid; data["nomi"]=nomi; set_state(uid,"mah_narx_kirit",data)
         bot.send_message(uid,f"💰 {nomi} uchun yangi narxni kiriting (so'mda):",reply_markup=cancel_kb())
-    except: bot.send_message(uid,"❗ Mahsulotni qaytadan tanlang")
+    except Exception as e:
+        bot.send_message(uid,f"❗ Mahsulotni qaytadan tanlang ({e})")
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="mah_narx_kirit")
 def mah_narx_kirit(msg):
@@ -2041,15 +2046,20 @@ def mah_ochir_start(msg):
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="mah_ochir_tanla")
 def mah_ochir_tanla(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
+    if msg.text=="❌ Bekor qilish":
+        user=get_user(uid); clear_state(uid)
+        bot.send_message(uid,"❌ Bekor qilindi",reply_markup=main_kb(user[3])); return
     if not msg.text.startswith("🗑"): return
     try:
-        rest=msg.text[2:]; mid=int(rest.split("|")[0])
-        nomi=rest.split("|")[1].split(" —")[0]
+        rest=msg.text.lstrip("🗑").lstrip()
+        mid=int(rest.split("|")[0])
+        nomi=rest.split("|",1)[1].split(" —")[0].strip()
         data["mid"]=mid; data["nomi"]=nomi; set_state(uid,"mah_ochir_tasdiq",data)
         bot.send_message(uid,
             f"⚠️ Rostdan ham o'chirasizmi?\n\n📝 {nomi}",
             reply_markup=tasdiq_kb())
-    except: bot.send_message(uid,"❗ Mahsulotni qaytadan tanlang")
+    except Exception as e:
+        bot.send_message(uid,f"❗ Mahsulotni qaytadan tanlang ({e})")
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="mah_ochir_tasdiq")
 def mah_ochir_tasdiq(msg):
