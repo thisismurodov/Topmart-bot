@@ -911,7 +911,9 @@ def _save_savdo(uid,data):
                 f"\n\n💰 Jami: {fmt(jami)}"+tolov_str+balans_line)
     try:
         if foto_id:
-            bot.send_photo(1261052681,foto_id,caption=admin_text)
+            for aid in ADMIN_IDS:
+                try: bot.send_photo(aid,foto_id,caption=admin_text)
+                except: pass
         else:
             for aid in ADMIN_IDS:
                 try: bot.send_message(aid,admin_text)
