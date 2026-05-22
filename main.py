@@ -123,8 +123,13 @@ def check_pending(uid):
         return True
     return False
 def fmt(a):
-    try: return f"{int(a):,}".replace(","," ")+" so'm"
+    try: return f"{round(float(a)):,}".replace(","," ")+" so'm"
     except: return "0 so'm"
+def fmt_miq(q):
+    try:
+        f=float(q)
+        return str(int(f)) if f==int(f) else f"{f:g}"
+    except: return str(q)
 
 def main_kb(role):
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
@@ -657,7 +662,7 @@ def _mah_list_kb(mahsulotlar, tanlangan):
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
     for i,(mid,nomi,narx,birlik) in enumerate(mahsulotlar,1):
         miqdor=tanlangan.get(mid,0)
-        mark=f" ✅ ×{miqdor}" if miqdor>0 else ""
+        mark=f" ✅ ×{fmt_miq(miqdor)}" if miqdor>0 else ""
         kb.add(f"{i}. {nomi} — {fmt(narx)}/{birlik}{mark}")
     kb.add("❌ Bekor qilish")
     return kb
@@ -721,18 +726,19 @@ def s_savdo_pick_mah(msg):
 def s_savdo_miqdor(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
     try:
-        miqdor=int(msg.text.strip())
+        miqdor=float(msg.text.strip().replace(",","."))
         if miqdor<=0: raise ValueError
     except:
-        bot.send_message(uid,"❗ Iltimos, musbat son kiriting:"); return
+        bot.send_message(uid,"❗ Iltimos, musbat son kiriting (masalan: 1.5):"); return
     mid=data["cur_mid"]; nomi=data["cur_nomi"]
     narx=data["cur_narx"]; birlik=data["cur_birlik"]
     prev=data["tanlangan"].get(mid,0)
-    data["tanlangan"][mid]=prev+miqdor
-    total_line=fmt(narx*(prev+miqdor))
+    yangi=prev+miqdor
+    data["tanlangan"][mid]=yangi
+    total_line=fmt(narx*yangi)
     set_state(uid,"savdo_next",data)
     bot.send_message(uid,
-        f"✅ Qo'shildi: {nomi} ×{prev+miqdor} = {total_line}\n\n"
+        f"✅ Qo'shildi: {nomi} ×{fmt_miq(yangi)} {birlik} × {fmt(narx)} = {total_line}\n\n"
         f"Nima qilasiz?",
         reply_markup=_next_kb())
 
@@ -750,7 +756,7 @@ def s_savdo_next(msg):
             miqdor=tanlangan.get(mid,0)
             if miqdor>0:
                 summa=narx*miqdor; jami+=summa
-                lines.append(f"  • {nomi} ×{miqdor} ({birlik}) = {fmt(summa)}")
+                lines.append(f"  • {nomi}\n     {fmt_miq(miqdor)} {birlik} × {fmt(narx)} = {fmt(summa)}")
         if not lines:
             bot.send_message(uid,"❗ Hech narsa tanlanmadi!"); return
         summary=(f"🧾 BUYURTMA XULOSASI\n{'━'*24}\n"
@@ -902,7 +908,7 @@ def _save_savdo(uid,data):
         mid,nomi,narx,birlik=m; miqdor=data["tanlangan"].get(mid,0)
         if miqdor>0:
             c.execute("INSERT INTO savdo_tafsilot (savdo_id,mahsulot_id,miqdor,narx,summa) VALUES (?,?,?,?,?)",(sid,mid,miqdor,narx,narx*miqdor))
-            lines.append(f"  • {nomi} ×{miqdor} = {fmt(narx*miqdor)}")
+            lines.append(f"  • {nomi}\n     {fmt_miq(miqdor)} {birlik} × {fmt(narx)} = {fmt(narx*miqdor)}")
     nasiya_summa=0
     balans_ishlatildi=data.get("balans_ishlatildi",0)
     if tolov=="nasiya": nasiya_summa=max(0,jami-balans_ishlatildi)
