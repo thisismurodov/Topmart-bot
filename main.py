@@ -616,15 +616,15 @@ def _save_dokon(uid,data):
     conn.commit();conn.close();clear_state(uid)
     owner_note=f"\n📱 Egasi TG: {data['owner_telegram_id']}" if data.get("owner_telegram_id") else ""
     bot.send_message(uid,f"✅ Dokon saqlandi!\n🏪 {data['nomi']}\n👤 {data['egasi']}\n📞 {data['telefon']}{owner_note}",reply_markup=main_kb(user[3]))
-    try:
-        bot.send_message(1261052681,
+    for aid in ADMIN_IDS:
+        try: bot.send_message(aid,
             f"🏪 Yangi dokon qo'shildi!\n\n"
             f"👤 Agent: {user[2]}\n"
             f"📍 Viloyat: {user[4]}\n\n"
             f"🏪 Dokon: {data['nomi']}\n"
             f"👤 Egasi: {data['egasi']}\n"
             f"📞 Telefon: {data['telefon']}{owner_note}")
-    except: pass
+        except: pass
     if data.get("owner_telegram_id"):
         try:
             bot.send_message(data["owner_telegram_id"],
@@ -913,7 +913,9 @@ def _save_savdo(uid,data):
         if foto_id:
             bot.send_photo(1261052681,foto_id,caption=admin_text)
         else:
-            bot.send_message(1261052681,admin_text)
+            for aid in ADMIN_IDS:
+                try: bot.send_message(aid,admin_text)
+                except: pass
     except: pass
     # Owner receipt
     if owner_tg:
@@ -1022,15 +1024,15 @@ def s_pul_nasiya_summa(msg):
         f"💳 Nasiyaga hisoblandi: {fmt(summa)}\n"
         f"{nasiya_status}",
         reply_markup=main_kb(user[3]))
-    try:
-        bot.send_message(1261052681,
+    for aid in ADMIN_IDS:
+        try: bot.send_message(aid,
             f"💰 Pul olindi (nasiyaga)!\n\n"
             f"👤 Agent: {user[2]}\n📍 {user[4]}\n"
             f"🏪 Dokon: {dnomi}\n"
             f"💵 Summa: {fmt(summa)}\n"
             f"💳 Nasiyaga: {fmt(summa)}\n"
             f"🔴 Qoldiq: {fmt(yangi_qoldiq)}")
-    except: pass
+        except: pass
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="pul_nasiya_ortiqcha_confirm")
 def s_pul_nasiya_ortiqcha_confirm(msg):
@@ -1065,15 +1067,15 @@ def s_pul_nasiya_ortiqcha_confirm(msg):
         f"✅ Nasiya to'liq to'landi!\n"
         f"💰 Ortiqcha balansga yozildi: +{fmt(ortiqcha)}",
         reply_markup=main_kb(user[3]))
-    try:
-        bot.send_message(1261052681,
+    for aid in ADMIN_IDS:
+        try: bot.send_message(aid,
             f"💰 Pul olindi (ortiqcha)!\n\n"
             f"👤 Agent: {user[2]}\n📍 {user[4]}\n"
             f"🏪 Dokon: {dnomi}\n"
             f"💵 Summa: {fmt(summa)}\n"
             f"💳 Nasiyaga: {fmt(nasiya_qoldiq)}\n"
             f"💰 Ortiqcha balans: +{fmt(ortiqcha)}")
-    except: pass
+        except: pass
     if owner_tg:
         try: bot.send_message(owner_tg,f"💰 Sizda {fmt(ortiqcha)} so'm ortiqcha to'lov bor.\nKeyingi tovardan ayiriladi.")
         except: pass
@@ -1088,14 +1090,14 @@ def s_pul_summa(msg):
               (data["dokon_id"],uid,summa,datetime.now().isoformat()))
     conn.commit();conn.close();clear_state(uid)
     bot.send_message(uid,f"✅ Pul olish saqlandi!\n🏪 {data['dokon_nomi']}\n💰 {fmt(summa)}",reply_markup=main_kb(user[3]))
-    try:
-        bot.send_message(1261052681,
+    for aid in ADMIN_IDS:
+        try: bot.send_message(aid,
             f"💰 Pul olindi!\n\n"
             f"👤 Agent: {user[2]}\n"
             f"📍 Viloyat: {user[4]}\n"
             f"🏪 Dokon: {data['dokon_nomi']}\n"
             f"💵 Summa: {fmt(summa)}")
-    except: pass
+        except: pass
 
 def _nasiya_summary_kb(uid):
     """Step 1: returns (summary_text, store_keyboard) for agent's nasiya."""
@@ -1223,14 +1225,14 @@ def s_nasiya_tolov(msg):
         f"{status}",
         reply_markup=main_kb(user[3]))
     clear_state(uid)
-    try:
-        bot.send_message(1261052681,
+    for aid in ADMIN_IDS:
+        try: bot.send_message(aid,
             f"💳 Nasiya to'lovi!\n\n"
             f"👤 Agent: {user[2]}\n📍 {user[4]}\n"
             f"🏪 Dokon: {dnomi}\n"
             f"💵 To'landi: {fmt(summa)}\n"
             f"🔴 Qoldiq: {fmt(yangi_qoldiq)}")
-    except: pass
+        except: pass
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="nasiya_tolov_ortiqcha_confirm")
 def s_nasiya_tolov_ortiqcha_confirm(msg):
@@ -1264,15 +1266,15 @@ def s_nasiya_tolov_ortiqcha_confirm(msg):
         f"✅ Barcha qarz to'liq to'landi!\n"
         f"💰 Ortiqcha balansga yozildi: +{fmt(ortiqcha)}",
         reply_markup=main_kb(user[3]))
-    try:
-        bot.send_message(1261052681,
+    for aid in ADMIN_IDS:
+        try: bot.send_message(aid,
             f"💳 Nasiya to'lovi (ortiqcha)!\n\n"
             f"👤 Agent: {user[2]}\n📍 {user[4]}\n"
             f"🏪 Dokon: {dnomi}\n"
             f"💵 To'landi: {fmt(summa)}\n"
             f"✅ Qarz: to'liq to'landi\n"
             f"💰 Ortiqcha balans: +{fmt(ortiqcha)}")
-    except: pass
+        except: pass
     if owner_tg:
         try: bot.send_message(owner_tg,f"💰 Sizda {fmt(ortiqcha)} so'm ortiqcha to'lov bor.\nKeyingi tovardan ayiriladi.")
         except: pass
@@ -1369,23 +1371,27 @@ def _save_olmadi(uid,data):
     maps_line=f"\n🗺 Location: https://maps.google.com/?q={lat},{lon}" if lat and lon else ""
     try:
         if data["sabab"] in("egasi_yoq","keyin_keling"):
-            bot.send_message(1261052681,
-                f"🔔 Qaytib kirish kerak!\n\n"
-                f"🏪 {data['dokon_nomi']}\n"
-                f"👤 Egasi: {egasi or '—'}\n"
-                f"📞 Telefon: {telefon or '—'}"
-                f"{maps_line}\n"
-                f"❌ Sabab: {data['sabab_text']}"
-                f"{qaytish}\n"
-                f"👤 Agent: {user[2]} | 📍 {user[4]}")
+            for aid in ADMIN_IDS:
+                try: bot.send_message(aid,
+                    f"🔔 Qaytib kirish kerak!\n\n"
+                    f"🏪 {data['dokon_nomi']}\n"
+                    f"👤 Egasi: {egasi or '—'}\n"
+                    f"📞 Telefon: {telefon or '—'}"
+                    f"{maps_line}\n"
+                    f"❌ Sabab: {data['sabab_text']}"
+                    f"{qaytish}\n"
+                    f"👤 Agent: {user[2]} | 📍 {user[4]}")
+                except: pass
         else:
-            bot.send_message(1261052681,
-                f"❌ Tovar olmadi!\n\n"
-                f"👤 Agent: {user[2]}\n"
-                f"📍 Viloyat: {user[4]}\n"
-                f"🏪 Dokon: {data['dokon_nomi']}\n"
-                f"❓ Sabab: {data['sabab_text']}"
-                f"{maps_line}")
+            for aid in ADMIN_IDS:
+                try: bot.send_message(aid,
+                    f"❌ Tovar olmadi!\n\n"
+                    f"👤 Agent: {user[2]}\n"
+                    f"📍 Viloyat: {user[4]}\n"
+                    f"🏪 Dokon: {data['dokon_nomi']}\n"
+                    f"❓ Sabab: {data['sabab_text']}"
+                    f"{maps_line}")
+                except: pass
     except: pass
 
 @bot.message_handler(func=lambda m:m.text=="📋 Qaytib kirish kerak")
