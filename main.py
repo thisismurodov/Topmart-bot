@@ -100,6 +100,39 @@ def init_db():
     except: pass
     try: c.execute("ALTER TABLE olmagan_dokonlar ADD COLUMN foto TEXT")
     except: pass
+    # Repeat System fields
+    for col,typ in [("first_order_date","TEXT"),("last_order_date","TEXT"),
+                    ("total_orders","INTEGER DEFAULT 0"),("repeat_orders","INTEGER DEFAULT 0"),
+                    ("total_sales","INTEGER DEFAULT 0"),("avg_repeat_days","REAL DEFAULT 0")]:
+        try: c.execute(f"ALTER TABLE dokonlar ADD COLUMN {col} {typ}")
+        except: pass
+    conn.commit()
+    # One-time backfill of repeat stats from existing savdolar
+    try:
+        c.execute("SELECT COUNT(*) FROM dokonlar WHERE total_orders>0")
+        if c.fetchone()[0]==0:
+            c.execute("SELECT DISTINCT dokon_id FROM savdolar")
+            for (did,) in c.fetchall():
+                c.execute("SELECT created_at,jami_summa FROM savdolar WHERE dokon_id=? ORDER BY created_at",(did,))
+                rows=c.fetchall()
+                if not rows: continue
+                first=rows[0][0]; last=rows[-1][0]
+                total=len(rows); tsum=sum(r[1] or 0 for r in rows)
+                repeat_n=max(0,total-1); avg=0.0
+                if repeat_n>0:
+                    diffs=[]
+                    from datetime import datetime as _dt
+                    for i in range(1,total):
+                        try:
+                            d1=_dt.fromisoformat(rows[i-1][0]); d2=_dt.fromisoformat(rows[i][0])
+                            diffs.append((d2-d1).days)
+                        except: pass
+                    if diffs: avg=sum(diffs)/len(diffs)
+                c.execute("""UPDATE dokonlar SET first_order_date=?,last_order_date=?,
+                             total_orders=?,repeat_orders=?,total_sales=?,avg_repeat_days=?
+                             WHERE id=?""",(first,last,total,repeat_n,tsum,avg,did))
+            conn.commit()
+    except Exception as _e: pass
     # One-time fix: To'lqinjon's viloyat was wrongly set as Farg'ona, should be Namangan
     try:
         c.execute("UPDATE dokonlar SET viloyat='Namangan' WHERE agent_id=8577758808 AND viloyat=\"Farg'ona\"")
@@ -136,6 +169,88 @@ def check_pending(uid):
 def fmt(a):
     try: return f"{round(float(a)):,}".replace(","," ")+" so'm"
     except: return "0 so'm"
+def _send_repeat_report(uid):
+    conn=get_db();c=conn.cursor()
+    c.execute("""SELECT id,nomi,viloyat,last_order_date,avg_repeat_days,total_orders,repeat_orders,total_sales
+                 FROM dokonlar WHERE holat='faol'""")
+    rows=c.fetchall(); conn.close()
+    if not rows:
+        bot.send_message(uid,"❗ Faol dokon yo'q.",reply_markup=main_kb("admin")); return
+    hot=warm=cold=new=0; repeat_stores=0; total_sales=0
+    cold_list=[]
+    for r in rows:
+        did,nomi,vil,last_d,avg_d,t_o,r_o,t_s=r
+        t_o=t_o or 0; r_o=r_o or 0; t_s=t_s or 0; avg_d=avg_d or 0
+        total_sales+=t_s
+        if r_o>0: repeat_stores+=1
+        lbl,days=get_store_status(last_d,avg_d)
+        if "HOT" in lbl: hot+=1
+        elif "WARM" in lbl: warm+=1
+        elif "COLD" in lbl:
+            cold+=1
+            cold_list.append((days or 0,nomi,vil or '—',days))
+        else: new+=1
+    rate=round((repeat_stores/len(rows))*100,1) if rows else 0
+    cold_list.sort(reverse=True)
+    text=(f"🔁 REPEAT HISOBOTI\n{'━'*26}\n"
+          f"🏪 Jami faol: {len(rows)}\n"
+          f"🟢 HOT: {hot}\n"
+          f"🟡 WARM: {warm}\n"
+          f"🔴 COLD: {cold}\n"
+          f"⚪ NEW (savdosiz): {new}\n\n"
+          f"📈 Repeat Rate: {rate}%\n"
+          f"   ({repeat_stores}/{len(rows)} dokon qayta savdo qilgan)\n"
+          f"💰 Jami savdo: {fmt(total_sales)}\n")
+    if cold_list:
+        text+=f"\n{'━'*26}\n🔴 QAYTA KIRISH KERAK (top 15):\n"
+        for d,nomi,vil,days in cold_list[:15]:
+            text+=f"  • {nomi} ({vil}) — {days} kun\n"
+    bot.send_message(uid,text,reply_markup=main_kb("admin"))
+
+@bot.message_handler(func=lambda m:m.text=="🔁 Repeat hisoboti")
+def repeat_hisoboti(msg):
+    uid=msg.from_user.id
+    if not is_admin(uid): return
+    _send_repeat_report(uid)
+
+def update_dokon_repeat(c, dokon_id, jami_summa):
+    """Repeat System: update store stats after each new order."""
+    from datetime import datetime as _dt
+    today=_dt.now()
+    c.execute("SELECT total_orders,repeat_orders,avg_repeat_days,last_order_date,first_order_date FROM dokonlar WHERE id=?",(dokon_id,))
+    row=c.fetchone()
+    if not row: return
+    total,repeat_n,avg,last_d,first_d=row
+    total=total or 0; repeat_n=repeat_n or 0; avg=avg or 0.0
+    if total==0:
+        first_d=today.isoformat()
+    else:
+        try:
+            ld=_dt.fromisoformat(last_d); days=(today-ld).days
+            total_repeat_time=avg*repeat_n
+            repeat_n+=1
+            avg=(total_repeat_time+days)/repeat_n
+        except: pass
+    total+=1
+    c.execute("""UPDATE dokonlar SET first_order_date=COALESCE(first_order_date,?),
+                 last_order_date=?, total_orders=?, repeat_orders=?, avg_repeat_days=?,
+                 total_sales=COALESCE(total_sales,0)+? WHERE id=?""",
+              (first_d,today.isoformat(),total,repeat_n,avg,jami_summa or 0,dokon_id))
+
+def get_store_status(last_order_date, avg_repeat_days):
+    """Returns (emoji_label, days_since_last)"""
+    from datetime import datetime as _dt
+    if not last_order_date: return ("⚪ NEW", None)
+    try:
+        ld=_dt.fromisoformat(last_order_date)
+        days=(_dt.now()-ld).days
+    except: return ("⚪ NEW", None)
+    avg=avg_repeat_days or 0
+    if avg<=0: return ("🟢 HOT" if days<=7 else ("🟡 WARM" if days<=21 else "🔴 COLD"), days)
+    if days<=avg: return ("🟢 HOT", days)
+    if days<=avg*2: return ("🟡 WARM", days)
+    return ("🔴 COLD", days)
+
 def fmt_miq(q):
     try:
         f=float(q)
@@ -153,6 +268,7 @@ def main_kb(role):
         kb.add("📈 Umumiy stat","🛍 Mahsulotlar")
         kb.add("👥 Mijozlar bazasi","👤 Agent boshqaruv")
         kb.add("📄 Dokonlar PDF","📢 Xabar yuborish")
+        kb.add("🔁 Repeat hisoboti")
     return kb
 def cancel_kb():
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -915,6 +1031,7 @@ def _save_savdo(uid,data):
     c.execute("INSERT INTO savdolar (dokon_id,agent_id,jami_summa,tolov_turi,foto,created_at) VALUES (?,?,?,?,?,?)",
               (data["dokon_id"],uid,jami,tolov,data.get("foto"),now))
     sid=c.lastrowid; lines=[]
+    update_dokon_repeat(c, data["dokon_id"], jami)
     for m in data["mahsulotlar"]:
         mid,nomi,narx,birlik=m; miqdor=data["tanlangan"].get(mid,0)
         if miqdor>0:
@@ -1541,7 +1658,9 @@ def s_admin_dokon_list(msg):
     try: did=int(msg.text[1:].split("||")[0])
     except: return
     conn=get_db();c=conn.cursor()
-    c.execute("SELECT id,nomi,egasi,telefon,viloyat,hudud,latitude,longitude,foto,holat FROM dokonlar WHERE id=?",(did,))
+    c.execute("""SELECT id,nomi,egasi,telefon,viloyat,hudud,latitude,longitude,foto,holat,
+                 first_order_date,last_order_date,total_orders,repeat_orders,total_sales,avg_repeat_days
+                 FROM dokonlar WHERE id=?""",(did,))
     d=c.fetchone()
     if not d: conn.close(); return
     c.execute("SELECT created_at,jami_summa,tolov_turi FROM savdolar WHERE dokon_id=? ORDER BY created_at DESC LIMIT 7",(did,))
@@ -1553,7 +1672,10 @@ def s_admin_dokon_list(msg):
     c.execute("SELECT COALESCE(balans,0) FROM mijoz_balans WHERE dokon_id=?",(did,))
     row2=c.fetchone(); mijoz_bal=row2[0] if row2 else 0
     conn.close()
-    _,nomi,egasi,telefon,viloyat,hudud,lat,lon,foto,holat=d
+    (_,nomi,egasi,telefon,viloyat,hudud,lat,lon,foto,holat,
+     first_d,last_d,total_o,repeat_o,total_s,avg_d)=d
+    total_o=total_o or 0; repeat_o=repeat_o or 0; total_s=total_s or 0; avg_d=avg_d or 0.0
+    status_lbl,days_since=get_store_status(last_d,avg_d)
     maps_link=f"https://maps.google.com/?q={lat},{lon}" if lat and lon else None
     holat_txt="✅ Faol" if holat=="faol" else "❌ Nofaol"
     text=(f"🏪 {nomi}  {holat_txt}\n{'━'*26}\n"
@@ -1573,6 +1695,13 @@ def s_admin_dokon_list(msg):
            f"🔴 Jami nasiya: {fmt(jami_nasiya)}")
     if mijoz_bal>0:
         text+=f"\n💰 Mijoz balansi: +{fmt(mijoz_bal)} (ortiqcha to'lov)"
+    text+=(f"\n{'━'*26}\n🔁 REPEAT TAHLIL:\n"
+           f"📦 Jami order: {total_o}\n"
+           f"🔁 Repeat order: {repeat_o}\n"
+           f"⏳ O'rtacha qaytish: {round(avg_d)} kun\n"
+           f"📅 Oxirgi: "+(last_d[:10] if last_d else '—')+
+           (f" ({days_since} kun oldin)" if days_since is not None else "")+
+           f"\n🔥 Status: {status_lbl}")
     clear_state(uid)
     back_kb=types.ReplyKeyboardMarkup(resize_keyboard=True)
     back_kb.add("👥 Mijozlar bazasi","❌ Bekor qilish")
