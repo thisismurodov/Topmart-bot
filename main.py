@@ -160,6 +160,24 @@ def get_user(tid):
 def is_admin(tid):
     if tid in ADMIN_IDS: return True
     u=get_user(tid); return u and u[3]=="admin"
+def all_admin_ids():
+    """Env ADMIN_IDS + DB role='admin' users (de-duplicated)."""
+    ids=set(ADMIN_IDS)
+    try:
+        conn=get_db();c=conn.cursor()
+        c.execute("SELECT telegram_id FROM users WHERE role='admin'")
+        for (tid,) in c.fetchall():
+            if tid: ids.add(tid)
+        conn.close()
+    except: pass
+    return ids
+def notify_admins(text=None, photo=None, caption=None):
+    """Send a notification to every admin (env + DB)."""
+    for aid in all_admin_ids():
+        try:
+            if photo: bot.send_photo(aid, photo, caption=caption or text)
+            else: bot.send_message(aid, text)
+        except: pass
 def check_pending(uid):
     u=get_user(uid)
     if u and u[3]=="pending":
@@ -339,7 +357,7 @@ def reg_viloyat(msg):
               (uid,data["name"],"pending",msg.text,datetime.now().isoformat()))
     conn.commit();conn.close();clear_state(uid)
     bot.send_message(uid,f"✅ {data['name']}, ro'yxatdan o'tdingiz!\n\n⏳ Hisobingiz admin tomonidan tasdiqlanishini kuting. Tasdiqlanganingizda xabar olasiz.",reply_markup=types.ReplyKeyboardRemove())
-    for aid in ADMIN_IDS:
+    for aid in all_admin_ids():
         try: bot.send_message(aid,f"🆕 Yangi agent:\n👤 {data['name']}\n📍 {msg.text}\n🆔 {uid}\n\n/approve {uid}\n/supervisor {uid}")
         except: pass
 
@@ -768,7 +786,7 @@ def _save_dokon(uid,data):
     conn.commit();conn.close();clear_state(uid)
     owner_note=f"\n📱 Egasi TG: {data['owner_telegram_id']}" if data.get("owner_telegram_id") else ""
     bot.send_message(uid,f"✅ Dokon saqlandi!\n🏪 {data['nomi']}\n👤 {data['egasi']}\n📞 {data['telefon']}{owner_note}",reply_markup=main_kb(user[3]))
-    for aid in ADMIN_IDS:
+    for aid in all_admin_ids():
         try: bot.send_message(aid,
             f"🏪 Yangi dokon qo'shildi!\n\n"
             f"👤 Agent: {user[2]}\n"
@@ -1068,11 +1086,11 @@ def _save_savdo(uid,data):
                 f"\n\n💰 Jami: {fmt(jami)}"+tolov_str+balans_line)
     try:
         if foto_id:
-            for aid in ADMIN_IDS:
+            for aid in all_admin_ids():
                 try: bot.send_photo(aid,foto_id,caption=admin_text)
                 except: pass
         else:
-            for aid in ADMIN_IDS:
+            for aid in all_admin_ids():
                 try: bot.send_message(aid,admin_text)
                 except: pass
     except: pass
@@ -1186,7 +1204,7 @@ def s_pul_nasiya_summa(msg):
         f"💳 Nasiyaga hisoblandi: {fmt(summa)}\n"
         f"{nasiya_status}",
         reply_markup=main_kb(user[3]))
-    for aid in ADMIN_IDS:
+    for aid in all_admin_ids():
         try: bot.send_message(aid,
             f"💰 Pul olindi (nasiyaga)!\n\n"
             f"👤 Agent: {user[2]}\n📍 {user[4]}\n"
@@ -1229,7 +1247,7 @@ def s_pul_nasiya_ortiqcha_confirm(msg):
         f"✅ Nasiya to'liq to'landi!\n"
         f"💰 Ortiqcha balansga yozildi: +{fmt(ortiqcha)}",
         reply_markup=main_kb(user[3]))
-    for aid in ADMIN_IDS:
+    for aid in all_admin_ids():
         try: bot.send_message(aid,
             f"💰 Pul olindi (ortiqcha)!\n\n"
             f"👤 Agent: {user[2]}\n📍 {user[4]}\n"
@@ -1252,7 +1270,7 @@ def s_pul_summa(msg):
               (data["dokon_id"],uid,summa,datetime.now().isoformat()))
     conn.commit();conn.close();clear_state(uid)
     bot.send_message(uid,f"✅ Pul olish saqlandi!\n🏪 {data['dokon_nomi']}\n💰 {fmt(summa)}",reply_markup=main_kb(user[3]))
-    for aid in ADMIN_IDS:
+    for aid in all_admin_ids():
         try: bot.send_message(aid,
             f"💰 Pul olindi!\n\n"
             f"👤 Agent: {user[2]}\n"
@@ -1387,7 +1405,7 @@ def s_nasiya_tolov(msg):
         f"{status}",
         reply_markup=main_kb(user[3]))
     clear_state(uid)
-    for aid in ADMIN_IDS:
+    for aid in all_admin_ids():
         try: bot.send_message(aid,
             f"💳 Nasiya to'lovi!\n\n"
             f"👤 Agent: {user[2]}\n📍 {user[4]}\n"
@@ -1428,7 +1446,7 @@ def s_nasiya_tolov_ortiqcha_confirm(msg):
         f"✅ Barcha qarz to'liq to'landi!\n"
         f"💰 Ortiqcha balansga yozildi: +{fmt(ortiqcha)}",
         reply_markup=main_kb(user[3]))
-    for aid in ADMIN_IDS:
+    for aid in all_admin_ids():
         try: bot.send_message(aid,
             f"💳 Nasiya to'lovi (ortiqcha)!\n\n"
             f"👤 Agent: {user[2]}\n📍 {user[4]}\n"
@@ -1587,7 +1605,7 @@ def _save_olmadi(uid,data):
              f"❌ Sabab: {data['sabab_text']}"
              f"{qaytish}\n"
              f"👤 Agent: {user[2]} | 📍 {user[4]}")
-    for aid in ADMIN_IDS:
+    for aid in all_admin_ids():
         try:
             if data.get("foto"):
                 bot.send_photo(aid,data["foto"],caption=caption)
