@@ -786,15 +786,36 @@ def _save_dokon(uid,data):
     conn.commit();conn.close();clear_state(uid)
     owner_note=f"\n📱 Egasi TG: {data['owner_telegram_id']}" if data.get("owner_telegram_id") else ""
     bot.send_message(uid,f"✅ Dokon saqlandi!\n🏪 {data['nomi']}\n👤 {data['egasi']}\n📞 {data['telefon']}{owner_note}",reply_markup=main_kb(user[3]))
+    lat=data.get("lat"); lon=data.get("lon")
+    maps_link=f"\n🗺 https://maps.google.com/?q={lat},{lon}" if lat and lon else ""
+    notif_text=(f"🏪 Yangi dokon qo'shildi!\n\n"
+                f"👤 Agent: {user[2]}\n"
+                f"📍 Viloyat: {user[4]}\n"
+                f"📌 Hudud: {data.get('hudud','—') or '—'}\n\n"
+                f"🏪 Dokon: {data['nomi']}\n"
+                f"👤 Egasi: {data['egasi']}\n"
+                f"📞 Telefon: {data['telefon']}{owner_note}{maps_link}")
+    foto_id=data.get("foto")
     for aid in all_admin_ids():
-        try: bot.send_message(aid,
-            f"🏪 Yangi dokon qo'shildi!\n\n"
-            f"👤 Agent: {user[2]}\n"
-            f"📍 Viloyat: {user[4]}\n\n"
-            f"🏪 Dokon: {data['nomi']}\n"
-            f"👤 Egasi: {data['egasi']}\n"
-            f"📞 Telefon: {data['telefon']}{owner_note}")
+        try:
+            if foto_id: bot.send_photo(aid, foto_id, caption=notif_text)
+            else: bot.send_message(aid, notif_text)
         except: pass
+    # Channel notification (optional via env var)
+    channel=os.environ.get("NEW_DOKON_CHANNEL_ID","").strip()
+    if channel:
+        try: ch_target=int(channel)
+        except: ch_target=channel  # @username
+        try:
+            if foto_id: bot.send_photo(ch_target, foto_id, caption=notif_text)
+            else: bot.send_message(ch_target, notif_text)
+            if lat and lon:
+                try: bot.send_location(ch_target, lat, lon)
+                except: pass
+        except Exception as e:
+            for aid in all_admin_ids():
+                try: bot.send_message(aid, f"⚠️ Kanalga yuborib bo'lmadi ({channel}): {e}")
+                except: pass
     if data.get("owner_telegram_id"):
         try:
             bot.send_message(data["owner_telegram_id"],
