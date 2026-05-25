@@ -2526,9 +2526,45 @@ def oylik_cmd(msg):
     except Exception as e:
         bot.send_message(msg.from_user.id,f"❗ Oylik hisobot xatosi: {e}")
 
-def send_today_revisits(target_agent=None):
-    """Send each agent the list of dokons due for revisit today.
-    If target_agent is provided, only send to that agent (for manual /qayta_kirish preview)."""
+def _format_agent_section(agent_name, items, with_header=True):
+    """Build a per-agent revisit block."""
+    text=""
+    if with_header:
+        text=f"📋 BUGUN KIRILADIGAN DOKONLAR\n\n👤 Agent: {agent_name}\n{'━'*26}\n"
+    else:
+        text=f"\n👤 Agent: {agent_name}  ({len(items)} ta)\n{'━'*26}\n"
+    for i,r in enumerate(items,1):
+        _,_,nomi,egasi,vil,hudud,lat,lon,last_d,_,_ = r
+        maps=f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "—"
+        last_s=last_d[:10] if last_d else "—"
+        text+=(f"\n{i}️⃣ DO'KON\n"
+               f"🏪 {nomi}\n"
+               f"👤 {egasi or '—'}\n"
+               f"📍 {vil or '—'} | {hudud or '—'}\n"
+               f"📅 Oxirgi savdo: {last_s}\n"
+               f"🗺 {maps}\n"
+               f"{'━'*26}\n")
+    return text
+
+def _send_long(chat_id, text):
+    """Telegram 4096 char limit-ga moslab yuborish."""
+    LIM=3800
+    while text:
+        chunk=text[:LIM]
+        # break at newline if possible
+        if len(text)>LIM:
+            nl=chunk.rfind("\n")
+            if nl>1000: chunk=text[:nl]
+        try: bot.send_message(chat_id, chunk, disable_web_page_preview=True)
+        except: pass
+        text=text[len(chunk):]
+
+def send_today_revisits(target_agent=None, target_admin=None):
+    """Cron / manual trigger for today's revisit lists.
+    - target_agent: agent uchun faqat o'zinikini yuboradi
+    - target_admin: admin uchun BARCHA agentlarning to'liq ro'yxatini yuboradi
+    - Ikkalasi None bo'lsa: har agentga o'zinikini + har adminga umumiy ro'yxat (cron)
+    """
     today=date.today().isoformat()
     conn=get_db();c=conn.cursor()
     if target_agent:
@@ -2549,50 +2585,57 @@ def send_today_revisits(target_agent=None):
                      ORDER BY r.agent_id, d.nomi""",(today,))
     rows=c.fetchall(); conn.close()
     if not rows:
+        msg_empty="✅ Bugun qayta kiriladigan dokon yo'q."
         if target_agent:
-            try: bot.send_message(target_agent,"✅ Bugun qayta kiriladigan dokon yo'q.")
+            try: bot.send_message(target_agent,msg_empty)
             except: pass
+        if target_admin:
+            try: bot.send_message(target_admin,msg_empty)
+            except: pass
+        if not target_agent and not target_admin:
+            for aid in all_admin_ids():
+                try: bot.send_message(aid,msg_empty)
+                except: pass
         return 0
     # Group by agent
     from collections import defaultdict
     by_agent=defaultdict(list)
     for r in rows: by_agent[r[10]].append(r)
+    # If only an admin requested — send them a single consolidated message
+    if target_admin:
+        text=f"📋 BUGUN KIRILADIGAN DOKONLAR (UMUMIY)\n\n📦 Jami: {len(rows)} ta dokon | 👥 {len(by_agent)} ta agent\n"
+        for agent_id, items in by_agent.items():
+            agent_name=items[0][9] or f"ID {agent_id}"
+            text+=_format_agent_section(agent_name, items, with_header=False)
+        _send_long(target_admin, text)
+        return len(by_agent)
+    # Otherwise: send to each agent (theirs) + to each admin (full list) — for cron / agent-only path
     sent=0
     for agent_id, items in by_agent.items():
+        if target_agent and target_agent!=agent_id: continue
         agent_name=items[0][9] or "—"
-        text=f"📋 BUGUN KIRILADIGAN DOKONLAR\n\n👤 Agent: {agent_name}\n{'━'*26}\n"
-        for i,r in enumerate(items,1):
-            _,_,nomi,egasi,vil,hudud,lat,lon,last_d,_,_ = r
-            maps=f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "—"
-            last_s=last_d[:10] if last_d else "—"
-            text+=(f"\n{i}️⃣ DO'KON\n"
-                   f"🏪 {nomi}\n"
-                   f"👤 {egasi or '—'}\n"
-                   f"📍 {vil or '—'} | {hudud or '—'}\n"
-                   f"📅 Oxirgi savdo: {last_s}\n"
-                   f"🗺 {maps}\n"
-                   f"{'━'*26}\n")
+        text=_format_agent_section(agent_name, items, with_header=True)
         text+=f"\n📦 Jami: {len(items)} ta dokon"
         try:
-            bot.send_message(agent_id, text, disable_web_page_preview=True)
-            sent+=1
+            _send_long(agent_id, text); sent+=1
         except Exception as e:
             print(f"⚠️ Revisit send failed for {agent_id}: {e}")
-        # Also notify admins with a summary
-        if not target_agent:
-            for aid in all_admin_ids():
-                if aid==agent_id: continue
-                try: bot.send_message(aid, f"📋 Agent {agent_name} ga {len(items)} ta qayta kirish dokoni yuborildi.")
-                except: pass
+    # Cron — also send admins the full consolidated list
+    if not target_agent:
+        admin_text=f"📋 BUGUN KIRILADIGAN DOKONLAR (UMUMIY)\n\n📦 Jami: {len(rows)} ta dokon | 👥 {len(by_agent)} ta agent\n"
+        for agent_id, items in by_agent.items():
+            agent_name=items[0][9] or f"ID {agent_id}"
+            admin_text+=_format_agent_section(agent_name, items, with_header=False)
+        for aid in all_admin_ids():
+            _send_long(aid, admin_text)
     return sent
 
 @bot.message_handler(commands=["qayta_kirish"])
 def qayta_kirish_cmd(msg):
-    """Manual trigger: agent sees own list; admin sees all."""
+    """Manual trigger: agent sees own list; admin sees full consolidated list."""
     uid=msg.from_user.id
     if is_admin(uid):
-        n=send_today_revisits()
-        bot.send_message(uid, f"✅ {n} ta agentga ro'yxat yuborildi.")
+        send_today_revisits(target_admin=uid)
     else:
         send_today_revisits(target_agent=uid)
 
