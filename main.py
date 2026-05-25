@@ -93,6 +93,15 @@ def init_db():
         dokon_id INTEGER UNIQUE,
         balans INTEGER DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS revisitlar (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        dokon_id INTEGER, agent_id INTEGER,
+        last_order_date TEXT,
+        revisit_date TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_revisit_pending ON revisitlar(revisit_date,status);
     """)
     conn.commit()
     # Migrations for existing DBs
@@ -1071,6 +1080,15 @@ def _save_savdo(uid,data):
               (data["dokon_id"],uid,jami,tolov,data.get("foto"),now))
     sid=c.lastrowid; lines=[]
     update_dokon_repeat(c, data["dokon_id"], jami)
+    # Qayta kirish workflow: schedule a revisit N days later (default 7)
+    try:
+        rdays=int(os.environ.get("REVISIT_DAYS","7"))
+        revisit_date=(date.today()+timedelta(days=rdays)).isoformat()
+        # Cancel any earlier pending revisit for this dokon — replace with the latest
+        c.execute("UPDATE revisitlar SET status='superseded' WHERE dokon_id=? AND status='pending'",(data["dokon_id"],))
+        c.execute("INSERT INTO revisitlar (dokon_id,agent_id,last_order_date,revisit_date,status,created_at) VALUES (?,?,?,?,?,?)",
+                  (data["dokon_id"],uid,date.today().isoformat(),revisit_date,"pending",now))
+    except Exception as _e: pass
     for m in data["mahsulotlar"]:
         mid,nomi,narx,birlik=m; miqdor=data["tanlangan"].get(mid,0)
         if miqdor>0:
@@ -2450,8 +2468,79 @@ def oylik_cmd(msg):
     except Exception as e:
         bot.send_message(msg.from_user.id,f"❗ Oylik hisobot xatosi: {e}")
 
+def send_today_revisits(target_agent=None):
+    """Send each agent the list of dokons due for revisit today.
+    If target_agent is provided, only send to that agent (for manual /qayta_kirish preview)."""
+    today=date.today().isoformat()
+    conn=get_db();c=conn.cursor()
+    if target_agent:
+        c.execute("""SELECT r.id, r.dokon_id, d.nomi, d.egasi, d.viloyat, d.hudud, d.latitude, d.longitude,
+                            r.last_order_date, u.name, r.agent_id
+                     FROM revisitlar r
+                     JOIN dokonlar d ON d.id=r.dokon_id
+                     LEFT JOIN users u ON u.telegram_id=r.agent_id
+                     WHERE r.revisit_date<=? AND r.status='pending' AND r.agent_id=?
+                     ORDER BY d.nomi""",(today,target_agent))
+    else:
+        c.execute("""SELECT r.id, r.dokon_id, d.nomi, d.egasi, d.viloyat, d.hudud, d.latitude, d.longitude,
+                            r.last_order_date, u.name, r.agent_id
+                     FROM revisitlar r
+                     JOIN dokonlar d ON d.id=r.dokon_id
+                     LEFT JOIN users u ON u.telegram_id=r.agent_id
+                     WHERE r.revisit_date<=? AND r.status='pending'
+                     ORDER BY r.agent_id, d.nomi""",(today,))
+    rows=c.fetchall(); conn.close()
+    if not rows:
+        if target_agent:
+            try: bot.send_message(target_agent,"✅ Bugun qayta kiriladigan dokon yo'q.")
+            except: pass
+        return 0
+    # Group by agent
+    from collections import defaultdict
+    by_agent=defaultdict(list)
+    for r in rows: by_agent[r[10]].append(r)
+    sent=0
+    for agent_id, items in by_agent.items():
+        agent_name=items[0][9] or "—"
+        text=f"📋 BUGUN KIRILADIGAN DOKONLAR\n\n👤 Agent: {agent_name}\n{'━'*26}\n"
+        for i,r in enumerate(items,1):
+            _,_,nomi,egasi,vil,hudud,lat,lon,last_d,_,_ = r
+            maps=f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "—"
+            last_s=last_d[:10] if last_d else "—"
+            text+=(f"\n{i}️⃣ DO'KON\n"
+                   f"🏪 {nomi}\n"
+                   f"👤 {egasi or '—'}\n"
+                   f"📍 {vil or '—'} | {hudud or '—'}\n"
+                   f"📅 Oxirgi savdo: {last_s}\n"
+                   f"🗺 {maps}\n"
+                   f"{'━'*26}\n")
+        text+=f"\n📦 Jami: {len(items)} ta dokon"
+        try:
+            bot.send_message(agent_id, text, disable_web_page_preview=True)
+            sent+=1
+        except Exception as e:
+            print(f"⚠️ Revisit send failed for {agent_id}: {e}")
+        # Also notify admins with a summary
+        if not target_agent:
+            for aid in all_admin_ids():
+                if aid==agent_id: continue
+                try: bot.send_message(aid, f"📋 Agent {agent_name} ga {len(items)} ta qayta kirish dokoni yuborildi.")
+                except: pass
+    return sent
+
+@bot.message_handler(commands=["qayta_kirish"])
+def qayta_kirish_cmd(msg):
+    """Manual trigger: agent sees own list; admin sees all."""
+    uid=msg.from_user.id
+    if is_admin(uid):
+        n=send_today_revisits()
+        bot.send_message(uid, f"✅ {n} ta agentga ro'yxat yuborildi.")
+    else:
+        send_today_revisits(target_agent=uid)
+
 def run_scheduler():
     schedule.every().day.at("03:00").do(send_daily_report)
+    schedule.every().day.at("07:00").do(send_today_revisits)
     while True:
         schedule.run_pending()
         time.sleep(30)
