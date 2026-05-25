@@ -1759,13 +1759,71 @@ def s_admin_dokon_list(msg):
            f"📅 Oxirgi: "+(last_d[:10] if last_d else '—')+
            (f" ({days_since} kun oldin)" if days_since is not None else "")+
            f"\n🔥 Status: {status_lbl}")
-    clear_state(uid)
-    back_kb=types.ReplyKeyboardMarkup(resize_keyboard=True)
+    set_state(uid,"admin_dokon_view",{"did":did,"nomi":nomi})
+    back_kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
+    back_kb.add("🗑 Dokonni o'chirish")
     back_kb.add("👥 Mijozlar bazasi","❌ Bekor qilish")
     if foto:
         try: bot.send_photo(uid,foto,caption=text,reply_markup=back_kb); return
         except: pass
     bot.send_message(uid,text,reply_markup=back_kb)
+
+@bot.message_handler(func=lambda m:m.text=="🗑 Dokonni o'chirish" and get_state(m.from_user.id)["state"]=="admin_dokon_view")
+def dokon_ochir_start(msg):
+    uid=msg.from_user.id
+    if not is_admin(uid): return
+    data=get_state(uid)["data"]; did=data.get("did")
+    if not did: return
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT COUNT(*),COALESCE(SUM(jami_summa),0) FROM savdolar WHERE dokon_id=?",(did,))
+    sv_n,sv_sum=c.fetchone()
+    c.execute("SELECT COALESCE(SUM(qoldiq),0) FROM nasiya WHERE dokon_id=? AND qoldiq>0",(did,))
+    nas=c.fetchone()[0]
+    conn.close()
+    set_state(uid,"admin_dokon_delete_confirm",data)
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("✅ HA, O'CHIRISH"); kb.add("❌ Bekor qilish")
+    warn=(f"⚠️ DIQQAT! Dokonni o'chirmoqchimisiz?\n\n"
+          f"🏪 {data['nomi']}\n\n"
+          f"Quyidagilar HAM o'chiriladi:\n"
+          f"  • {sv_n} ta savdo ({fmt(sv_sum)})\n"
+          f"  • Barcha nasiya yozuvlari (qoldiq: {fmt(nas)})\n"
+          f"  • Pul olish tarixi\n"
+          f"  • Olmagan/qaytib kirish yozuvlari\n"
+          f"  • Mijoz balansi\n\n"
+          f"❗ Bu amalni QAYTARIB BO'LMAYDI!")
+    bot.send_message(uid,warn,reply_markup=kb)
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="admin_dokon_delete_confirm")
+def dokon_ochir_tasdiq(msg):
+    uid=msg.from_user.id; data=get_state(uid)["data"]
+    if msg.text!="✅ HA, O'CHIRISH":
+        clear_state(uid)
+        user=get_user(uid)
+        bot.send_message(uid,"❌ Bekor qilindi",reply_markup=main_kb(user[3])); return
+    did=data["did"]; nomi=data["nomi"]
+    conn=get_db();c=conn.cursor()
+    try:
+        c.execute("DELETE FROM savdo_tafsilot WHERE savdo_id IN (SELECT id FROM savdolar WHERE dokon_id=?)",(did,))
+        c.execute("DELETE FROM savdolar WHERE dokon_id=?",(did,))
+        c.execute("DELETE FROM nasiya WHERE dokon_id=?",(did,))
+        c.execute("DELETE FROM pul_olish WHERE dokon_id=?",(did,))
+        c.execute("DELETE FROM olmagan_dokonlar WHERE dokon_id=?",(did,))
+        c.execute("DELETE FROM revisitlar WHERE dokon_id=?",(did,))
+        c.execute("DELETE FROM mijoz_balans WHERE dokon_id=?",(did,))
+        c.execute("DELETE FROM dokonlar WHERE id=?",(did,))
+        conn.commit()
+    except Exception as e:
+        conn.close(); clear_state(uid)
+        bot.send_message(uid,f"❗ Xato: {e}"); return
+    conn.close(); clear_state(uid)
+    user=get_user(uid)
+    bot.send_message(uid,f"✅ '{nomi}' dokoni va barcha tarixi o'chirildi.",reply_markup=main_kb(user[3]))
+    # Notify other admins
+    for aid in all_admin_ids():
+        if aid==uid: continue
+        try: bot.send_message(aid,f"🗑 Admin {user[2]} '{nomi}' dokonini o'chirdi.")
+        except: pass
 
 @bot.message_handler(func=lambda m:m.text=="👤 Agent boshqaruv")
 def agent_boshqaruv(msg):
@@ -2539,8 +2597,17 @@ def qayta_kirish_cmd(msg):
         send_today_revisits(target_agent=uid)
 
 def run_scheduler():
-    schedule.every().day.at("03:00").do(send_daily_report)
-    schedule.every().day.at("07:00").do(send_today_revisits)
+    # Tashkent vaqti bilan (UTC+5). Eski schedule versiyalari uchun fallback — UTC ekvivalent.
+    tz="Asia/Tashkent"
+    try:
+        schedule.every().day.at("08:00", tz).do(send_daily_report)
+        schedule.every().day.at("07:00", tz).do(send_today_revisits)
+        print(f"⏰ Scheduler started (TZ={tz}): daily_report 08:00, revisits 07:00")
+    except TypeError:
+        # Old `schedule` lib — convert manually (Tashkent = UTC+5)
+        schedule.every().day.at("03:00").do(send_daily_report)   # 08:00 Tashkent
+        schedule.every().day.at("02:00").do(send_today_revisits) # 07:00 Tashkent
+        print("⏰ Scheduler started (UTC fallback): daily_report 03:00 UTC, revisits 02:00 UTC")
     while True:
         schedule.run_pending()
         time.sleep(30)
