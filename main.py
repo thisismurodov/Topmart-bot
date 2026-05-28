@@ -320,6 +320,92 @@ def send_weekly_lost_alert():
     for aid in all_admin_ids():
         _send_long(aid, header+text)
 
+def _build_old_nasiya_report(scope_agent_id=None):
+    """Old-credit aging report. Groups outstanding nasiya by age:
+    🟡 30-60 kun, 🟠 60-90 kun, 🔴 90+ kun."""
+    from datetime import datetime as _dt
+    conn=get_db();c=conn.cursor()
+    base="""SELECT n.id,n.dokon_id,d.nomi,d.viloyat,n.jami_summa,n.tolangan,n.qoldiq,
+                   n.created_at,n.agent_id,COALESCE(u.name,'—')
+            FROM nasiya n
+            JOIN dokonlar d ON d.id=n.dokon_id
+            LEFT JOIN users u ON u.telegram_id=n.agent_id
+            WHERE n.qoldiq>0"""
+    if scope_agent_id:
+        c.execute(base+" AND n.agent_id=?",(scope_agent_id,))
+    else:
+        c.execute(base)
+    rows=c.fetchall(); conn.close()
+    now=_dt.now()
+    yellow=[]; orange=[]; red=[]
+    sum_y=sum_o=sum_r=0
+    for nid,did,nomi,vil,jami,tol,qoldiq,created_at,agent_id,aname in rows:
+        try:
+            cr=_dt.fromisoformat(created_at); days=(now-cr).days
+        except: continue
+        if days<30: continue
+        rec=(nomi,vil,aname,qoldiq,days,created_at[:10])
+        if days>=90: red.append(rec); sum_r+=qoldiq
+        elif days>=60: orange.append(rec); sum_o+=qoldiq
+        else: yellow.append(rec); sum_y+=qoldiq
+    for lst in (red,orange,yellow): lst.sort(key=lambda x:-x[3])
+    title="💸 ESKI NASIYALAR" + ("" if scope_agent_id else " (BARCHA AGENTLAR)")
+    total_sum=sum_y+sum_o+sum_r
+    text=(f"{title}\n{'━'*26}\n"
+          f"🔴 90+ kun: {len(red)} ta — {fmt(sum_r)}\n"
+          f"🟠 60-90 kun: {len(orange)} ta — {fmt(sum_o)}\n"
+          f"🟡 30-60 kun: {len(yellow)} ta — {fmt(sum_y)}\n"
+          f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+          f"💰 Jami muddatli qarz: {fmt(total_sum)}\n")
+    def _fmt_block(emoji, label, items, limit=15):
+        if not items: return ""
+        s=f"\n{'━'*26}\n{emoji} {label} ({len(items)} ta):\n"
+        for nomi,vil,aname,qoldiq,days,sana in items[:limit]:
+            if scope_agent_id:
+                s+=f"  • {nomi} ({vil or '—'}) — {fmt(qoldiq)} | {days} kun ({sana})\n"
+            else:
+                s+=f"  • {nomi} ({aname}) — {fmt(qoldiq)} | {days} kun\n"
+        if len(items)>limit:
+            s+=f"  … +{len(items)-limit} ta\n"
+        return s
+    text+=_fmt_block("🔴","KRITIK (90+ kun)",red)
+    text+=_fmt_block("🟠","XAVFLI (60-90 kun)",orange)
+    text+=_fmt_block("🟡","DIQQAT (30-60 kun)",yellow)
+    if len(red)+len(orange)+len(yellow)==0:
+        text+=f"\n{'━'*26}\n✅ Eski nasiya yo'q! Hammasi yangi yoki to'langan."
+    return text, len(red)+len(orange)+len(yellow), total_sum
+
+@bot.message_handler(func=lambda m:m.text=="💸 Eski nasiyalar")
+def eski_nasiyalar(msg):
+    uid=msg.from_user.id
+    if not is_admin(uid):
+        # Agent — only own
+        user=get_user(uid)
+        if not user or user[3] not in ("agent","supervisor"): return
+        text,_,_=_build_old_nasiya_report(scope_agent_id=uid)
+        _send_long(uid, text); return
+    text,_,_=_build_old_nasiya_report()
+    _send_long(uid, text)
+
+def send_weekly_old_nasiya_alert():
+    """Cron: dushanba 09:30 — adminlar va har bir agentga muddatli nasiyalar."""
+    # Adminlarga umumiy
+    text,total,_=_build_old_nasiya_report()
+    if total>0:
+        header="💸 HAFTALIK NASIYA OGOHLANTIRISH\n\n"
+        for aid in all_admin_ids():
+            _send_long(aid, header+text)
+    # Har agentga o'zinikini
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT DISTINCT agent_id FROM nasiya WHERE qoldiq>0")
+    agent_ids=[r[0] for r in c.fetchall()]
+    conn.close()
+    for aid in agent_ids:
+        atext,atotal,_=_build_old_nasiya_report(scope_agent_id=aid)
+        if atotal>0:
+            try: _send_long(aid, "💸 SIZNING MUDDATLI NASIYALARINGIZ\n\n"+atext)
+            except: pass
+
 def update_dokon_repeat(c, dokon_id, jami_summa):
     """Repeat System: update store stats after each new order."""
     from datetime import datetime as _dt
@@ -376,6 +462,7 @@ def main_kb(role):
         kb.add("👥 Mijozlar bazasi","👤 Agent boshqaruv")
         kb.add("📄 Dokonlar PDF","📢 Xabar yuborish")
         kb.add("🔁 Repeat hisoboti","⚠️ Yo'qolayotgan dokonlar")
+        kb.add("💸 Eski nasiyalar")
     return kb
 def cancel_kb():
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -2750,13 +2837,15 @@ def run_scheduler():
         schedule.every().day.at("08:00", tz).do(send_daily_report)
         schedule.every().day.at("07:00", tz).do(send_today_revisits)
         schedule.every().monday.at("09:00", tz).do(send_weekly_lost_alert)
-        print(f"⏰ Scheduler started (TZ={tz}): daily 08:00, revisits 07:00, lost-alert Mon 09:00")
+        schedule.every().monday.at("09:30", tz).do(send_weekly_old_nasiya_alert)
+        print(f"⏰ Scheduler started (TZ={tz}): daily 08:00, revisits 07:00, lost-alert Mon 09:00, old-nasiya Mon 09:30")
     except TypeError:
         # Old `schedule` lib — convert manually (Tashkent = UTC+5)
         schedule.every().day.at("03:00").do(send_daily_report)   # 08:00 Tashkent
         schedule.every().day.at("02:00").do(send_today_revisits) # 07:00 Tashkent
         schedule.every().monday.at("04:00").do(send_weekly_lost_alert) # 09:00 Tashkent
-        print("⏰ Scheduler started (UTC fallback): daily 03:00, revisits 02:00, lost-alert Mon 04:00 UTC")
+        schedule.every().monday.at("04:30").do(send_weekly_old_nasiya_alert) # 09:30 Tashkent
+        print("⏰ Scheduler started (UTC fallback): daily 03:00, revisits 02:00, lost-alert Mon 04:00, old-nasiya Mon 04:30 UTC")
     while True:
         schedule.run_pending()
         time.sleep(30)
