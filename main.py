@@ -1259,6 +1259,26 @@ def _scope_clause(uid):
     if is_admin(uid): return "", ()
     return " AND agent_id=?", (uid,)
 
+def _bosh_dokon_kb(uid):
+    """For bosh agent: list dokons ordered by created_at DESC (newest first), 2 columns."""
+    conn=get_db();c=conn.cursor()
+    if is_admin(uid):
+        c.execute("""SELECT id,nomi FROM dokonlar
+                     WHERE holat='faol' ORDER BY created_at DESC, id DESC""")
+    else:
+        c.execute("""SELECT id,nomi FROM dokonlar
+                     WHERE agent_id=? AND holat='faol'
+                     ORDER BY created_at DESC, id DESC""",(uid,))
+    rows=c.fetchall(); conn.close()
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
+    pair=[]
+    for d in rows:
+        pair.append(f"🏪 {d[0]}||{d[1]}")
+        if len(pair)==2: kb.add(*pair); pair=[]
+    if pair: kb.add(*pair)
+    kb.add("❌ Bekor qilish")
+    return kb, len(rows)
+
 def _viloyat_kb(uid):
     """Build viloyat-picker keyboard + recent 5 dokon shortcuts."""
     conn=get_db();c=conn.cursor()
@@ -1330,70 +1350,21 @@ def tovar_berish(msg):
     if not user: return
     if check_pending(uid): return
     conn=get_db();c=conn.cursor()
-    if is_admin(uid):
-        c.execute("SELECT COUNT(*) FROM dokonlar WHERE holat='faol'")
-    else:
-        c.execute("SELECT COUNT(*) FROM dokonlar WHERE agent_id=? AND holat='faol'",(uid,))
-    dokon_n=c.fetchone()[0]
     c.execute("SELECT id,nomi,narx,birlik FROM mahsulotlar WHERE faol=1 ORDER BY nomi")
     mahsulotlar=c.fetchall(); conn.close()
-    if dokon_n==0: bot.send_message(uid,"❗ Faol dokon yo'q."); return
     if not mahsulotlar: bot.send_message(uid,"❗ Mahsulotlar yo'q."); return
-    set_state(uid,"savdo_pick_viloyat",{"mahsulotlar":mahsulotlar,"tanlangan":{}})
-    kb,_,rn=_viloyat_kb(uid)
-    hint="🕐 Oxirgi 5 dokon yuqorida — tezkor tanlash uchun.\n\n" if rn else ""
+    kb,n=_bosh_dokon_kb(uid)
+    if n==0: bot.send_message(uid,"❗ Faol dokon yo'q."); return
+    set_state(uid,"savdo_dokon",{"mahsulotlar":mahsulotlar,"tanlangan":{}})
     bot.send_message(uid,
-        f"🏪 DOKONNI TANLANG ({dokon_n} ta faol)\n\n{hint}📍 Viloyatni tanlang:",
+        f"🏪 DOKONNI TANLANG ({n} ta faol)\n\n"
+        f"🆕 Oxirgi qo'shilganlar tepada:",
         reply_markup=kb)
-
-@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="savdo_pick_viloyat")
-def s_savdo_pick_viloyat(msg):
-    uid=msg.from_user.id; data=get_state(uid)["data"]
-    txt=(msg.text or "").strip()
-    # Recent dokon shortcut
-    if txt.startswith("🏪 ") and "||" in txt:
-        try:
-            did,dnomi=txt.replace("🏪 ","").split("||",1)
-            data["dokon_id"]=int(did); data["dokon_nomi"]=dnomi
-        except: return
-        set_state(uid,"savdo_pick_mah",data)
-        bot.send_message(uid,f"🏪 {data['dokon_nomi']}\n\n📦 Mahsulot tanlang:",
-            reply_markup=_mah_list_kb(data["mahsulotlar"],data["tanlangan"])); return
-    if not txt.startswith("📍 "): return
-    # Strip "📍 " prefix and " (N)" suffix
-    vil=txt[2:].strip()
-    if " (" in vil: vil=vil.rsplit(" (",1)[0]
-    data["viloyat"]=vil
-    kb,n=_hudud_kb(uid,vil)
-    if n==0: bot.send_message(uid,"❗ Hudud topilmadi."); return
-    set_state(uid,"savdo_pick_hudud",data)
-    bot.send_message(uid,f"📍 {vil}\n\n🏘 Hududni tanlang:",reply_markup=kb)
-
-@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="savdo_pick_hudud")
-def s_savdo_pick_hudud(msg):
-    uid=msg.from_user.id; data=get_state(uid)["data"]
-    txt=(msg.text or "").strip()
-    if txt=="⬅️ Viloyatga qaytish":
-        set_state(uid,"savdo_pick_viloyat",data)
-        kb,_,_=_viloyat_kb(uid)
-        bot.send_message(uid,"📍 Viloyatni tanlang:",reply_markup=kb); return
-    if not txt.startswith("🏘 "): return
-    hud=txt[2:].strip()
-    if " (" in hud: hud=hud.rsplit(" (",1)[0]
-    data["hudud"]=hud
-    kb,n=_dokon_in_hudud_kb(uid,data["viloyat"],hud)
-    if n==0: bot.send_message(uid,"❗ Dokon topilmadi."); return
-    set_state(uid,"savdo_dokon",data)
-    bot.send_message(uid,f"📍 {data['viloyat']} → 🏘 {hud}\n\n🏪 Dokonni tanlang ({n} ta):",reply_markup=kb)
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="savdo_dokon")
 def s_savdo_dokon(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
     txt=(msg.text or "").strip()
-    if txt=="⬅️ Hududga qaytish":
-        set_state(uid,"savdo_pick_hudud",data)
-        kb,_=_hudud_kb(uid,data.get("viloyat","")); 
-        bot.send_message(uid,f"📍 {data.get('viloyat','—')}\n\n🏘 Hududni tanlang:",reply_markup=kb); return
     if not (txt.startswith("🏪 ") and "||" in txt): return
     try:
         did,dnomi=txt.replace("🏪 ","").split("||",1)
