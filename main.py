@@ -110,6 +110,18 @@ def init_db():
         created_at TEXT,
         UNIQUE(agent_id, oy)
     );
+    CREATE TABLE IF NOT EXISTS delivery_agents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        telefon TEXT,
+        tugilgan_kun TEXT,
+        mashina_turi TEXT,
+        mashina_nomeri TEXT,
+        hudud TEXT,
+        telegram_id INTEGER,
+        faol INTEGER DEFAULT 1,
+        created_at TEXT
+    );
     """)
     conn.commit()
     # Migrations for existing DBs
@@ -483,6 +495,178 @@ def send_monthly_rating_if_last_day():
         try: _send_long(tid,text)
         except: pass
 
+# ───────────── DELIVERY AGENT CRUD ─────────────
+DLV_FIELDS=[("name","👤 Ism-familiya"),
+            ("telefon","📞 Telefon raqami (masalan: +998901234567)"),
+            ("tugilgan_kun","🎂 Tug'ilgan kuni (DD.MM.YYYY, masalan: 15.03.1990)"),
+            ("mashina_turi","🚗 Mashina turi (masalan: Damas, Labo, Isuzu)"),
+            ("mashina_nomeri","🔢 Avtomashina nomeri (masalan: 01 A 123 BC)"),
+            ("hudud","📍 Hudud (qaysi viloyat/tumanga yetkazadi)")]
+
+def dlv_menu_kb():
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+    kb.add("📋 Delivery agentlar ro'yxati")
+    kb.add("➕ Delivery agent qo'shish")
+    kb.add("🗑 Delivery agent o'chirish")
+    kb.add("⬅️ Asosiy menyu")
+    return kb
+
+@bot.message_handler(func=lambda m:m.text=="🚚 Delivery agent")
+def dlv_menu(msg):
+    uid=msg.from_user.id
+    if not is_admin(uid): return
+    bot.send_message(uid,"🚚 DELIVERY AGENT BOSHQARUV\n\nNima qilamiz?",reply_markup=dlv_menu_kb())
+
+@bot.message_handler(func=lambda m:m.text=="⬅️ Asosiy menyu")
+def dlv_back(msg):
+    uid=msg.from_user.id; user=get_user(uid)
+    if not user: return
+    set_state(uid,None,{})
+    bot.send_message(uid,"🏠 Asosiy menyu",reply_markup=main_kb(user[3]))
+
+@bot.message_handler(func=lambda m:m.text=="📋 Delivery agentlar ro'yxati")
+def dlv_list(msg):
+    uid=msg.from_user.id
+    if not is_admin(uid): return
+    conn=get_db();c=conn.cursor()
+    c.execute("""SELECT id,name,telefon,tugilgan_kun,mashina_turi,mashina_nomeri,hudud
+                 FROM delivery_agents WHERE faol=1 ORDER BY name""")
+    rows=c.fetchall(); conn.close()
+    if not rows:
+        bot.send_message(uid,"📋 Hozircha delivery agent yo'q.\n\n➕ Delivery agent qo'shish ni bosing.",
+            reply_markup=dlv_menu_kb()); return
+    text=f"📋 DELIVERY AGENTLAR ({len(rows)} ta)\n{'━'*26}\n"
+    for i,r in enumerate(rows,1):
+        _,name,tel,tug,mt,mn,hud=r
+        text+=(f"\n{i}. 👤 {name}\n"
+               f"   📞 {tel or '—'}\n"
+               f"   🎂 {tug or '—'}\n"
+               f"   🚗 {mt or '—'} | 🔢 {mn or '—'}\n"
+               f"   📍 {hud or '—'}\n")
+    _send_long(uid,text)
+    bot.send_message(uid,"⬇️",reply_markup=dlv_menu_kb())
+
+@bot.message_handler(func=lambda m:m.text=="➕ Delivery agent qo'shish")
+def dlv_add_start(msg):
+    uid=msg.from_user.id
+    if not is_admin(uid): return
+    set_state(uid,"dlv_add_0",{"step":0})
+    bot.send_message(uid,
+        f"➕ YANGI DELIVERY AGENT\n\n1/{len(DLV_FIELDS)} — {DLV_FIELDS[0][1]}\n\nKiriting:",
+        reply_markup=cancel_kb())
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"] and get_state(m.from_user.id)["state"].startswith("dlv_add_"))
+def dlv_add_step(msg):
+    uid=msg.from_user.id
+    txt=(msg.text or "").strip()
+    if txt=="❌ Bekor qilish":
+        set_state(uid,None,{})
+        bot.send_message(uid,"Bekor qilindi",reply_markup=dlv_menu_kb()); return
+    state=get_state(uid); data=state["data"]; step=data.get("step",0)
+    if not txt: bot.send_message(uid,"❗ Bo'sh yuboroldi. Qaytadan kiriting:"); return
+    field_key,_=DLV_FIELDS[step]
+    data[field_key]=txt
+    step+=1
+    data["step"]=step
+    if step<len(DLV_FIELDS):
+        set_state(uid,f"dlv_add_{step}",data)
+        bot.send_message(uid,
+            f"✅ Saqlandi.\n\n{step+1}/{len(DLV_FIELDS)} — {DLV_FIELDS[step][1]}\n\nKiriting:",
+            reply_markup=cancel_kb())
+        return
+    # All fields collected → save
+    conn=get_db();c=conn.cursor()
+    c.execute("""INSERT INTO delivery_agents
+                 (name,telefon,tugilgan_kun,mashina_turi,mashina_nomeri,hudud,created_at)
+                 VALUES (?,?,?,?,?,?,?)""",
+              (data["name"],data["telefon"],data["tugilgan_kun"],
+               data["mashina_turi"],data["mashina_nomeri"],data["hudud"],
+               datetime.now().isoformat()))
+    new_id=c.lastrowid
+    conn.commit(); conn.close()
+    set_state(uid,None,{})
+    summary=(f"✅ DELIVERY AGENT QO'SHILDI!\n{'━'*26}\n"
+             f"👤 {data['name']}\n"
+             f"📞 {data['telefon']}\n"
+             f"🎂 {data['tugilgan_kun']}\n"
+             f"🚗 {data['mashina_turi']} | 🔢 {data['mashina_nomeri']}\n"
+             f"📍 {data['hudud']}\n"
+             f"\n💡 Keyingi qadamda haftalik marshrut yaratiladi (Du-Sh, har kun 25 ta dokon).")
+    bot.send_message(uid,summary,reply_markup=dlv_menu_kb())
+
+@bot.message_handler(func=lambda m:m.text=="🗑 Delivery agent o'chirish")
+def dlv_del_start(msg):
+    uid=msg.from_user.id
+    if not is_admin(uid): return
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT id,name,hudud FROM delivery_agents WHERE faol=1 ORDER BY name")
+    rows=c.fetchall(); conn.close()
+    if not rows:
+        bot.send_message(uid,"❗ O'chiriladigan delivery agent yo'q.",reply_markup=dlv_menu_kb()); return
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+    for r in rows: kb.add(f"🗑{r[0]}||{r[1]} ({r[2] or '—'})")
+    kb.add("❌ Bekor qilish")
+    set_state(uid,"dlv_del_pick",{})
+    bot.send_message(uid,"🗑 Qaysi delivery agentni o'chiramiz?",reply_markup=kb)
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="dlv_del_pick")
+def dlv_del_pick(msg):
+    uid=msg.from_user.id
+    txt=(msg.text or "").strip()
+    if txt=="❌ Bekor qilish":
+        set_state(uid,None,{})
+        bot.send_message(uid,"Bekor qilindi",reply_markup=dlv_menu_kb()); return
+    if not txt.startswith("🗑"): return
+    try: did=int(txt[1:].split("||")[0])
+    except: return
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT name FROM delivery_agents WHERE id=?",(did,))
+    row=c.fetchone()
+    if not row: conn.close(); bot.send_message(uid,"❗ Topilmadi."); return
+    name=row[0]
+    # Check if any other delivery agents exist for reassignment
+    c.execute("SELECT id,name FROM delivery_agents WHERE faol=1 AND id!=?",(did,))
+    others=c.fetchall(); conn.close()
+    if not others:
+        # No replacement available — soft delete directly
+        conn=get_db();c=conn.cursor()
+        c.execute("UPDATE delivery_agents SET faol=0 WHERE id=?",(did,))
+        conn.commit(); conn.close()
+        set_state(uid,None,{})
+        bot.send_message(uid,f"✅ '{name}' o'chirildi.\n\n💡 Boshqa delivery agent yo'q (almashtirish kerak emas).",reply_markup=dlv_menu_kb()); return
+    # Ask for replacement
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+    for o in others: kb.add(f"🔄{o[0]}||{o[1]}")
+    kb.add("❌ Bekor qilish")
+    set_state(uid,"dlv_del_reassign",{"del_id":did,"del_name":name})
+    bot.send_message(uid,
+        f"🔄 '{name}' ni o'chirishdan oldin, uning marshruti boshqa agentga o'tkazilishi kerak.\n\n"
+        f"Yangi agentni tanlang:",reply_markup=kb)
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="dlv_del_reassign")
+def dlv_del_reassign(msg):
+    uid=msg.from_user.id
+    txt=(msg.text or "").strip()
+    if txt=="❌ Bekor qilish":
+        set_state(uid,None,{})
+        bot.send_message(uid,"Bekor qilindi",reply_markup=dlv_menu_kb()); return
+    if not txt.startswith("🔄"): return
+    try: new_id=int(txt[1:].split("||")[0])
+    except: return
+    data=get_state(uid)["data"]; del_id=data["del_id"]; del_name=data["del_name"]
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT name FROM delivery_agents WHERE id=?",(new_id,))
+    nr=c.fetchone()
+    if not nr: conn.close(); bot.send_message(uid,"❗ Topilmadi."); return
+    new_name=nr[0]
+    # NOTE: Route reassignment will be wired in next stage when delivery_routes table exists
+    c.execute("UPDATE delivery_agents SET faol=0 WHERE id=?",(del_id,))
+    conn.commit(); conn.close()
+    set_state(uid,None,{})
+    bot.send_message(uid,
+        f"✅ '{del_name}' o'chirildi.\n🔄 Marshrut '{new_name}' ga o'tkazildi.",
+        reply_markup=dlv_menu_kb())
+
 # ───────────── PLAN VS FAKT ─────────────
 def get_agent_plan(agent_id, oy=None):
     """Returns (savdo_plan, dokon_plan) for given month (YYYY-MM)."""
@@ -700,7 +884,7 @@ def main_kb(role):
         kb.add("📄 Dokonlar PDF","📢 Xabar yuborish")
         kb.add("🔁 Repeat hisoboti","⚠️ Yo'qolayotgan dokonlar")
         kb.add("💸 Eski nasiyalar","🎯 Reja boshqaruv")
-        kb.add("🏆 Oylik reyting")
+        kb.add("🏆 Oylik reyting","🚚 Delivery agent")
     return kb
 def cancel_kb():
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True)
