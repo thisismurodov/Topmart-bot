@@ -1318,27 +1318,47 @@ def s_pul_summa(msg):
             f"💵 Summa: {fmt(summa)}")
         except: pass
 
-def _nasiya_summary_kb(uid):
-    """Step 1: returns (summary_text, store_keyboard) for agent's nasiya."""
+def _nasiya_summary_kb(uid, admin_view=False):
+    """Step 1: returns (summary_text, store_keyboard) for nasiya.
+    admin_view=True → barcha agentlar bo'yicha (admin uchun).
+    Aks holda — faqat uid agent o'zinikini ko'radi."""
     conn=get_db();c=conn.cursor()
-    c.execute("""SELECT d.id,d.nomi,COALESCE(SUM(n.qoldiq),0)
-                 FROM nasiya n JOIN dokonlar d ON d.id=n.dokon_id
-                 WHERE n.agent_id=? AND n.qoldiq>0
-                 GROUP BY d.id,d.nomi ORDER BY d.nomi""",(uid,))
-    store_rows=c.fetchall()
-    c.execute("SELECT COUNT(*) FROM dokonlar WHERE agent_id=? AND holat='faol'",(uid,))
-    jami_dokon=c.fetchone()[0]
+    if admin_view:
+        c.execute("""SELECT d.id,d.nomi,COALESCE(SUM(n.qoldiq),0),COALESCE(u.name,'—')
+                     FROM nasiya n JOIN dokonlar d ON d.id=n.dokon_id
+                     LEFT JOIN users u ON u.telegram_id=n.agent_id
+                     WHERE n.qoldiq>0
+                     GROUP BY d.id,d.nomi,u.name ORDER BY SUM(n.qoldiq) DESC""")
+        store_rows=c.fetchall()
+        c.execute("SELECT COUNT(*) FROM dokonlar WHERE holat='faol'")
+        jami_dokon=c.fetchone()[0]
+    else:
+        c.execute("""SELECT d.id,d.nomi,COALESCE(SUM(n.qoldiq),0),''
+                     FROM nasiya n JOIN dokonlar d ON d.id=n.dokon_id
+                     WHERE n.agent_id=? AND n.qoldiq>0
+                     GROUP BY d.id,d.nomi ORDER BY d.nomi""",(uid,))
+        store_rows=c.fetchall()
+        c.execute("SELECT COUNT(*) FROM dokonlar WHERE agent_id=? AND holat='faol'",(uid,))
+        jami_dokon=c.fetchone()[0]
     conn.close()
     nasiyali_d=len(store_rows)
     nasiyasiz_d=max(0,jami_dokon-nasiyali_d)
     jami_qoldiq=sum(r[2] for r in store_rows)
-    text=(f"🗂 NASIYA BOSHQARUV\n{'━'*26}\n"
+    title="🗂 NASIYA BOSHQARUV (BARCHA AGENTLAR)" if admin_view else "🗂 NASIYA BOSHQARUV"
+    text=(f"{title}\n{'━'*26}\n"
           f"🔴 Jami nasiya: {fmt(jami_qoldiq)}\n"
           f"🏪 Nasiyali dokonlar: {nasiyali_d} ta\n"
           f"✅ Nasiyasiz dokonlar: {nasiyasiz_d} ta")
+    if admin_view and store_rows:
+        text+=f"\n\n📋 TOP nasiyali dokonlar:\n"
+        for did,dnomi,qoldiq,aname in store_rows[:15]:
+            text+=f"  • {dnomi} ({aname}) — {fmt(qoldiq)}\n"
+        if len(store_rows)>15:
+            text+=f"  … +{len(store_rows)-15} ta dokon"
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
-    for did,dnomi,qoldiq in store_rows:
-        kb.add(f"🏪 {did}||{dnomi}")
+    if not admin_view:
+        for did,dnomi,qoldiq,_ in store_rows:
+            kb.add(f"🏪 {did}||{dnomi}")
     kb.add("❌ Bekor qilish")
     return text,kb,store_rows
 
@@ -1373,9 +1393,13 @@ def nasiya_boshqaruv(msg):
     uid=msg.from_user.id; user=get_user(uid)
     if not user: return
     if check_pending(uid): return
-    text,kb,store_rows=_nasiya_summary_kb(uid)
+    admin_view=is_admin(uid)
+    text,kb,store_rows=_nasiya_summary_kb(uid, admin_view=admin_view)
     if not store_rows:
         bot.send_message(uid,text+"\n\n✅ Nasiya qarz yo'q!",reply_markup=main_kb(user[3])); return
+    if admin_view:
+        # Admin faqat ko'radi — to'lov qabul qilish agentniki
+        bot.send_message(uid,text,reply_markup=main_kb(user[3])); return
     set_state(uid,"nasiya_store_list",{})
     bot.send_message(uid,text,reply_markup=kb)
 
