@@ -690,6 +690,7 @@ def main_kb(role):
         kb.add("🏪 Yangi dokon","📦 Tovar berish")
         kb.add("💰 Pul olish","❌ Tovar olmadi")
         kb.add("📋 Qaytib kirish kerak","💳 Nasiya boshqaruv")
+        kb.add("🔍 Qidiruv")
     if role in("agent","supervisor"):
         kb.add("🎯 Mening rejam")
     if role in("supervisor","admin"): kb.add("👥 Agentlar statistikasi")
@@ -2118,6 +2119,102 @@ def bajarildi(msg):
     except: bot.send_message(uid,"❗ Xato")
 
 TOLOV_LABELS={"naqd":"Naqd ✅","karta":"Karta ✅","nasiya":"Nasiya 🔴","aralash":"Aralash 🔀"}
+
+# ───────────── QIDIRUV (dokon/mijoz) ─────────────
+@bot.message_handler(func=lambda m:m.text=="🔍 Qidiruv")
+def qidiruv_start(msg):
+    uid=msg.from_user.id
+    user=get_user(uid)
+    if not user: return
+    set_state(uid,"qidiruv_input",{"role":user[3]})
+    bot.send_message(uid,
+        "🔍 QIDIRUV\n\nDokon nomi, egasi yoki telefon raqamini kiriting:\n"
+        "Masalan: <code>Fayz</code> yoki <code>Akmal</code> yoki <code>998901234567</code>",
+        parse_mode="HTML",reply_markup=cancel_kb())
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="qidiruv_input")
+def qidiruv_query(msg):
+    uid=msg.from_user.id
+    q=(msg.text or "").strip()
+    if not q or q=="❌ Bekor qilish":
+        user=get_user(uid)
+        set_state(uid,None,{})
+        bot.send_message(uid,"Bekor qilindi",reply_markup=main_kb(user[3] if user else "agent")); return
+    if len(q)<2:
+        bot.send_message(uid,"❗ Kamida 2 ta belgi kiriting."); return
+    user=get_user(uid); role=user[3]
+    conn=get_db();c=conn.cursor()
+    like=f"%{q}%"
+    if role=="admin":
+        c.execute("""SELECT id,nomi,egasi,viloyat,holat FROM dokonlar
+                     WHERE nomi LIKE ? OR egasi LIKE ? OR telefon LIKE ?
+                     ORDER BY nomi LIMIT 50""",(like,like,like))
+    else:
+        c.execute("""SELECT id,nomi,egasi,viloyat,holat FROM dokonlar
+                     WHERE agent_id=? AND (nomi LIKE ? OR egasi LIKE ? OR telefon LIKE ?)
+                     ORDER BY nomi LIMIT 50""",(uid,like,like,like))
+    rows=c.fetchall(); conn.close()
+    if not rows:
+        bot.send_message(uid,f"❌ '{q}' bo'yicha hech narsa topilmadi.",reply_markup=main_kb(role)); 
+        set_state(uid,None,{}); return
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+    for d in rows:
+        icon="✅" if d[4]=="faol" else "❌"
+        kb.add(f"🏪{d[0]}||{d[1]} ({d[3] or '—'}) {icon}")
+    kb.add("❌ Bekor qilish")
+    if role=="admin":
+        set_state(uid,"admin_dokon_list",{})
+    else:
+        set_state(uid,"agent_dokon_search_list",{})
+    bot.send_message(uid,f"🔍 Topildi: {len(rows)} ta\n\nDokonni tanlang:",reply_markup=kb)
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="agent_dokon_search_list")
+def s_agent_dokon_view(msg):
+    uid=msg.from_user.id
+    if not msg.text.startswith("🏪"):
+        if msg.text=="❌ Bekor qilish":
+            user=get_user(uid); set_state(uid,None,{})
+            bot.send_message(uid,"Bekor qilindi",reply_markup=main_kb(user[3]))
+        return
+    try: did=int(msg.text[1:].split("||")[0])
+    except: return
+    conn=get_db();c=conn.cursor()
+    c.execute("""SELECT id,nomi,egasi,telefon,viloyat,hudud,latitude,longitude,foto,holat,
+                 last_order_date,total_orders,total_sales
+                 FROM dokonlar WHERE id=? AND agent_id=?""",(did,uid))
+    d=c.fetchone()
+    if not d:
+        conn.close(); bot.send_message(uid,"❗ Topilmadi yoki sizniki emas."); return
+    c.execute("SELECT created_at,jami_summa,tolov_turi FROM savdolar WHERE dokon_id=? ORDER BY created_at DESC LIMIT 5",(did,))
+    savdolar=c.fetchall()
+    c.execute("SELECT COALESCE(SUM(qoldiq),0) FROM nasiya WHERE dokon_id=? AND qoldiq>0",(did,))
+    jami_nasiya=c.fetchone()[0]
+    conn.close()
+    (_,nomi,egasi,telefon,viloyat,hudud,lat,lon,foto,holat,last_d,total_o,total_s)=d
+    holat_txt="✅ Faol" if holat=="faol" else "❌ Nofaol"
+    text=(f"🏪 {nomi}  {holat_txt}\n{'━'*26}\n"
+          f"👤 Egasi: {egasi or '—'}\n"
+          f"📞 Telefon: {telefon or '—'}\n"
+          f"📍 {viloyat or '—'} | {hudud or '—'}\n")
+    if lat and lon: text+=f"🗺 https://maps.google.com/?q={lat},{lon}\n"
+    text+=f"\n{'━'*26}\n📊 OXIRGI 5 SAVDO:\n"
+    for s in savdolar:
+        sana=s[0][:10] if s[0] else "—"
+        tl=TOLOV_LABELS.get(s[2],s[2] or "—")
+        text+=f"  • {sana} | {fmt(s[1])} | {tl}\n"
+    if not savdolar: text+="  — Savdo yo'q\n"
+    text+=(f"\n{'━'*26}\n"
+           f"💰 Jami savdo: {fmt(total_s or 0)}\n"
+           f"📦 Jami order: {total_o or 0}\n"
+           f"🔴 Jami nasiya: {fmt(jami_nasiya)}\n"
+           f"📅 Oxirgi: "+(last_d[:10] if last_d else "—"))
+    set_state(uid,None,{})
+    user=get_user(uid)
+    kb=main_kb(user[3])
+    if foto:
+        try: bot.send_photo(uid,foto,caption=text,reply_markup=kb); return
+        except: pass
+    bot.send_message(uid,text,reply_markup=kb)
 
 @bot.message_handler(func=lambda m:m.text=="👥 Mijozlar bazasi")
 def mijozlar_bazasi(msg):
