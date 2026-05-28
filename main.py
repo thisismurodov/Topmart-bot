@@ -102,6 +102,14 @@ def init_db():
         created_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_revisit_pending ON revisitlar(revisit_date,status);
+    CREATE TABLE IF NOT EXISTS agent_plans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id INTEGER, oy TEXT,
+        savdo_plan INTEGER DEFAULT 0,
+        dokon_plan INTEGER DEFAULT 0,
+        created_at TEXT,
+        UNIQUE(agent_id, oy)
+    );
     """)
     conn.commit()
     # Migrations for existing DBs
@@ -406,6 +414,163 @@ def send_weekly_old_nasiya_alert():
             try: _send_long(aid, "💸 SIZNING MUDDATLI NASIYALARINGIZ\n\n"+atext)
             except: pass
 
+# ───────────── PLAN VS FAKT ─────────────
+def get_agent_plan(agent_id, oy=None):
+    """Returns (savdo_plan, dokon_plan) for given month (YYYY-MM)."""
+    if oy is None: oy=datetime.now().strftime("%Y-%m")
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT savdo_plan,dokon_plan FROM agent_plans WHERE agent_id=? AND oy=?",(agent_id,oy))
+    r=c.fetchone(); conn.close()
+    return (r[0] or 0, r[1] or 0) if r else (0,0)
+
+def get_agent_fakt(agent_id, oy=None):
+    """Returns (savdo_fakt, dokon_fakt) - actual monthly sales & new dokons."""
+    if oy is None: oy=datetime.now().strftime("%Y-%m")
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT COALESCE(SUM(jami_summa),0) FROM savdolar WHERE agent_id=? AND substr(created_at,1,7)=?",(agent_id,oy))
+    savdo=c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM dokonlar WHERE agent_id=? AND substr(created_at,1,7)=?",(agent_id,oy))
+    dokon=c.fetchone()[0]
+    conn.close()
+    return savdo, dokon
+
+def _progress_bar(pct, width=10):
+    full=int(min(100,max(0,pct))/100*width)
+    return "█"*full+"░"*(width-full)
+
+def _plan_status_emoji(pct):
+    if pct>=100: return "🏆"
+    if pct>=80: return "🟢"
+    if pct>=50: return "🟡"
+    if pct>=25: return "🟠"
+    return "🔴"
+
+def _plan_block(name, savdo_p, dokon_p, savdo_f, dokon_f, with_name=True):
+    s=f"👤 {name}\n" if with_name else ""
+    if savdo_p>0:
+        pct=savdo_f/savdo_p*100
+        s+=(f"  💰 Savdo: {fmt(savdo_f)} / {fmt(savdo_p)}\n"
+            f"  {_plan_status_emoji(pct)} [{_progress_bar(pct)}] {pct:.0f}%\n")
+    else:
+        s+=f"  💰 Savdo: {fmt(savdo_f)} (reja qo'yilmagan)\n"
+    if dokon_p>0:
+        pct=dokon_f/dokon_p*100
+        s+=(f"  🏪 Yangi dokon: {dokon_f} / {dokon_p}\n"
+            f"  {_plan_status_emoji(pct)} [{_progress_bar(pct)}] {pct:.0f}%\n")
+    else:
+        s+=f"  🏪 Yangi dokon: {dokon_f} (reja qo'yilmagan)\n"
+    return s
+
+@bot.message_handler(func=lambda m:m.text=="🎯 Mening rejam")
+def mening_rejam(msg):
+    uid=msg.from_user.id; user=get_user(uid)
+    if not user: return
+    oy=datetime.now().strftime("%Y-%m")
+    sp,dp=get_agent_plan(uid,oy)
+    sf,df=get_agent_fakt(uid,oy)
+    text=f"🎯 MENING REJAM\n📅 {oy}\n{'━'*26}\n\n"+_plan_block(user[2],sp,dp,sf,df,with_name=False)
+    if sp==0 and dp==0:
+        text+=f"\n💡 Admin sizga hali oylik reja qo'ymagan.\nReja qo'yilgach, bu yerda ko'rasiz."
+    else:
+        # Days left in month
+        from calendar import monthrange
+        now=datetime.now()
+        days_total=monthrange(now.year,now.month)[1]
+        days_left=days_total-now.day+1
+        text+=f"\n📅 Oy oxirigacha: {days_left} kun qoldi"
+        if sp>0 and sf<sp:
+            need=sp-sf; per_day=need/max(1,days_left)
+            text+=f"\n💪 Kuniga kerak: {fmt(int(per_day))}"
+    bot.send_message(uid,text)
+
+@bot.message_handler(func=lambda m:m.text=="🎯 Reja boshqaruv")
+def reja_boshqaruv(msg):
+    uid=msg.from_user.id
+    if not is_admin(uid): return
+    oy=datetime.now().strftime("%Y-%m")
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT telegram_id,name,viloyat FROM users WHERE role IN ('agent','supervisor') ORDER BY name")
+    agents=c.fetchall(); conn.close()
+    if not agents:
+        bot.send_message(uid,"❗ Agentlar yo'q."); return
+    text=f"🎯 REJA vs FAKT — BARCHA AGENTLAR\n📅 {oy}\n{'━'*26}\n\n"
+    for tid,name,vil in agents:
+        sp,dp=get_agent_plan(tid,oy); sf,df=get_agent_fakt(tid,oy)
+        text+=_plan_block(f"{name} ({vil or '—'})",sp,dp,sf,df)+"\n"
+    text+=f"{'━'*26}\n💡 Agentga reja qo'yish uchun pastdan tanlang:"
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+    for tid,name,vil in agents:
+        kb.add(f"🎯 {tid}||{name}")
+    kb.add("❌ Bekor qilish")
+    set_state(uid,"plan_agent_select",{"oy":oy})
+    _send_long(uid,text)
+    bot.send_message(uid,"👤 Reja qo'ymoqchi bo'lgan agentni tanlang:",reply_markup=kb)
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="plan_agent_select")
+def s_plan_agent_select(msg):
+    uid=msg.from_user.id
+    if not msg.text.startswith("🎯 "):
+        if msg.text=="❌ Bekor qilish":
+            clear_state(uid); user=get_user(uid)
+            bot.send_message(uid,"Bekor qilindi",reply_markup=main_kb(user[3]))
+        return
+    try:
+        rest=msg.text[2:].strip()
+        tid_str,name=rest.split("||",1); tid=int(tid_str)
+    except:
+        bot.send_message(uid,"❗ Xato format"); return
+    data=get_state(uid)["data"]; oy=data["oy"]
+    sp,dp=get_agent_plan(tid,oy)
+    set_state(uid,"plan_savdo_input",{"oy":oy,"tid":tid,"name":name})
+    txt=(f"👤 {name}\n📅 {oy}\n\n"
+         f"Hozirgi reja: 💰 {fmt(sp)} savdo | 🏪 {dp} dokon\n\n"
+         f"💰 Yangi SAVDO rejasini kiriting (so'm):\nMasalan: 500000000\nO'zgartirmaslik uchun: 0")
+    bot.send_message(uid,txt,reply_markup=cancel_kb())
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="plan_savdo_input")
+def s_plan_savdo_input(msg):
+    uid=msg.from_user.id
+    if msg.text=="❌ Bekor qilish":
+        clear_state(uid); user=get_user(uid)
+        bot.send_message(uid,"Bekor qilindi",reply_markup=main_kb(user[3])); return
+    try:
+        savdo=int(msg.text.replace(" ","").replace(",",""))
+        if savdo<0: raise ValueError
+    except:
+        bot.send_message(uid,"❗ Faqat raqam kiriting"); return
+    data=get_state(uid)["data"]; data["savdo"]=savdo
+    set_state(uid,"plan_dokon_input",data)
+    bot.send_message(uid,f"✅ Savdo rejasi: {fmt(savdo)}\n\n🏪 Endi YANGI DOKON rejasini kiriting:\nMasalan: 10\nO'zgartirmaslik uchun: 0",reply_markup=cancel_kb())
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="plan_dokon_input")
+def s_plan_dokon_input(msg):
+    uid=msg.from_user.id
+    if msg.text=="❌ Bekor qilish":
+        clear_state(uid); user=get_user(uid)
+        bot.send_message(uid,"Bekor qilindi",reply_markup=main_kb(user[3])); return
+    try:
+        dokon=int(msg.text.replace(" ",""))
+        if dokon<0: raise ValueError
+    except:
+        bot.send_message(uid,"❗ Faqat raqam kiriting"); return
+    data=get_state(uid)["data"]
+    tid=data["tid"]; name=data["name"]; oy=data["oy"]; savdo=data["savdo"]
+    # Determine final values (0 = keep existing)
+    cur_sp,cur_dp=get_agent_plan(tid,oy)
+    final_sp = savdo if savdo>0 else cur_sp
+    final_dp = dokon if dokon>0 else cur_dp
+    conn=get_db();c=conn.cursor()
+    c.execute("""INSERT INTO agent_plans (agent_id,oy,savdo_plan,dokon_plan,created_at)
+                 VALUES (?,?,?,?,?)
+                 ON CONFLICT(agent_id,oy) DO UPDATE SET savdo_plan=?, dokon_plan=?""",
+              (tid,oy,final_sp,final_dp,datetime.now().isoformat(),final_sp,final_dp))
+    conn.commit(); conn.close()
+    clear_state(uid); user=get_user(uid)
+    bot.send_message(uid,f"✅ {name} uchun {oy} rejasi saqlandi:\n💰 {fmt(final_sp)} savdo\n🏪 {final_dp} dokon",reply_markup=main_kb(user[3]))
+    # Notify agent
+    try: bot.send_message(tid,f"🎯 Admin sizga {oy} oyiga reja qo'ydi:\n💰 Savdo: {fmt(final_sp)}\n🏪 Yangi dokon: {final_dp}\n\nKo'rish: 🎯 Mening rejam")
+    except: pass
+
 def update_dokon_repeat(c, dokon_id, jami_summa):
     """Repeat System: update store stats after each new order."""
     from datetime import datetime as _dt
@@ -456,13 +621,15 @@ def main_kb(role):
         kb.add("🏪 Yangi dokon","📦 Tovar berish")
         kb.add("💰 Pul olish","❌ Tovar olmadi")
         kb.add("📋 Qaytib kirish kerak","💳 Nasiya boshqaruv")
+    if role in("agent","supervisor"):
+        kb.add("🎯 Mening rejam")
     if role in("supervisor","admin"): kb.add("👥 Agentlar statistikasi")
     if role=="admin":
         kb.add("📈 Umumiy stat","🛍 Mahsulotlar")
         kb.add("👥 Mijozlar bazasi","👤 Agent boshqaruv")
         kb.add("📄 Dokonlar PDF","📢 Xabar yuborish")
         kb.add("🔁 Repeat hisoboti","⚠️ Yo'qolayotgan dokonlar")
-        kb.add("💸 Eski nasiyalar")
+        kb.add("💸 Eski nasiyalar","🎯 Reja boshqaruv")
     return kb
 def cancel_kb():
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True)
