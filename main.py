@@ -3130,6 +3130,7 @@ def _show_agent_profile(uid,agent_id):
     if a[3]!="blok": kb.add("🚫 Bloklash")
     else: kb.add("✅ Blokdan chiqarish")
     kb.add("📊 Batafsil statistika")
+    kb.add("🗑 To'liq o'chirish")
     kb.add("◀️ Orqaga","❌ Bekor qilish")
     set_state(uid,"agent_action",{"agent_id":agent_id,"agent_name":a[1],"agent_role":a[3]})
     bot.send_message(uid,text,reply_markup=kb)
@@ -3168,6 +3169,68 @@ def s_agent_action(msg):
         _show_agent_profile(uid,agent_id); return
     if msg.text=="📊 Batafsil statistika":
         _agent_batafsil(uid,agent_id,agent_name); return
+    if msg.text=="🗑 To'liq o'chirish":
+        # Count what would be deleted
+        conn=get_db();c=conn.cursor()
+        c.execute("SELECT COUNT(*) FROM dokonlar WHERE agent_id=?",(agent_id,))
+        d_n=c.fetchone()[0]
+        c.execute("SELECT COUNT(*),COALESCE(SUM(jami_summa),0) FROM savdolar WHERE agent_id=?",(agent_id,))
+        s_n,s_sum=c.fetchone()
+        c.execute("SELECT COUNT(*),COALESCE(SUM(qoldiq),0) FROM nasiya WHERE agent_id=? AND qoldiq>0",(agent_id,))
+        n_n,n_sum=c.fetchone()
+        conn.close()
+        kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+        kb.add("✅ HA, BUTUNLAY O'CHIR")
+        kb.add("◀️ Orqaga")
+        set_state(uid,"agent_delete_confirm",data)
+        bot.send_message(uid,
+            f"⚠️ DIQQAT — TO'LIQ O'CHIRISH\n{'━'*26}\n"
+            f"👤 {agent_name}\n\n"
+            f"Quyidagilar ham o'chiriladi:\n"
+            f"🏪 Dokonlar: {d_n} ta\n"
+            f"📦 Savdolar: {s_n} ta ({fmt(s_sum)})\n"
+            f"🔴 Faol nasiyalar: {n_n} ta ({fmt(n_sum)})\n"
+            f"📋 Revisit, ❌ tovar olmadi, 🎯 reja, 💰 pul olish — barchasi\n\n"
+            f"❗ BU AMAL QAYTARIB BO'LMAYDI!",
+            reply_markup=kb)
+        return
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="agent_delete_confirm")
+def s_agent_delete_confirm(msg):
+    uid=msg.from_user.id; data=get_state(uid)["data"]
+    agent_id=data["agent_id"]; agent_name=data["agent_name"]
+    if msg.text=="◀️ Orqaga":
+        _show_agent_profile(uid,agent_id); return
+    if msg.text!="✅ HA, BUTUNLAY O'CHIR": return
+    conn=get_db();c=conn.cursor()
+    # Collect dokon ids to also clean dependent rows
+    c.execute("SELECT id FROM dokonlar WHERE agent_id=?",(agent_id,))
+    dokon_ids=[r[0] for r in c.fetchall()]
+    if dokon_ids:
+        ph=",".join("?"*len(dokon_ids))
+        c.execute(f"DELETE FROM savdo_tafsilot WHERE savdo_id IN (SELECT id FROM savdolar WHERE dokon_id IN ({ph}))",dokon_ids)
+        c.execute(f"DELETE FROM savdolar WHERE dokon_id IN ({ph})",dokon_ids)
+        c.execute(f"DELETE FROM nasiya WHERE dokon_id IN ({ph})",dokon_ids)
+        c.execute(f"DELETE FROM pul_olish WHERE dokon_id IN ({ph})",dokon_ids)
+        c.execute(f"DELETE FROM mijoz_balans WHERE dokon_id IN ({ph})",dokon_ids)
+        c.execute(f"DELETE FROM olmagan_dokonlar WHERE dokon_id IN ({ph})",dokon_ids)
+        c.execute(f"DELETE FROM revisitlar WHERE dokon_id IN ({ph})",dokon_ids)
+        c.execute(f"DELETE FROM delivery_routes WHERE dokon_id IN ({ph})",dokon_ids)
+    # Also drop any rows tied to agent_id directly (in case dokons were reassigned)
+    c.execute("DELETE FROM savdo_tafsilot WHERE savdo_id IN (SELECT id FROM savdolar WHERE agent_id=?)",(agent_id,))
+    c.execute("DELETE FROM savdolar WHERE agent_id=?",(agent_id,))
+    c.execute("DELETE FROM nasiya WHERE agent_id=?",(agent_id,))
+    c.execute("DELETE FROM pul_olish WHERE agent_id=?",(agent_id,))
+    c.execute("DELETE FROM olmagan_dokonlar WHERE agent_id=?",(agent_id,))
+    c.execute("DELETE FROM revisitlar WHERE agent_id=?",(agent_id,))
+    c.execute("DELETE FROM agent_plans WHERE agent_id=?",(agent_id,))
+    c.execute("DELETE FROM dokonlar WHERE agent_id=?",(agent_id,))
+    c.execute("DELETE FROM users WHERE telegram_id=?",(agent_id,))
+    conn.commit(); conn.close()
+    try: bot.send_message(agent_id,"🗑 Sizning akkauntingiz va barcha ma'lumotlaringiz tizimdan to'liq o'chirildi.")
+    except: pass
+    set_state(uid,None,{})
+    bot.send_message(uid,f"✅ {agent_name} va u bilan bog'liq barcha ma'lumotlar o'chirildi.",reply_markup=main_kb("admin"))
 
 def _agent_batafsil(uid,agent_id,agent_name):
     conn=get_db();c=conn.cursor()
