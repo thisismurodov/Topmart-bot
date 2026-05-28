@@ -179,6 +179,8 @@ def init_db():
     except: pass
     try: c.execute("CREATE TABLE IF NOT EXISTS mijoz_balans (id INTEGER PRIMARY KEY AUTOINCREMENT, dokon_id INTEGER UNIQUE, balans INTEGER DEFAULT 0)")
     except: pass
+    try: c.execute("ALTER TABLE delivery_routes ADD COLUMN added_by_dlv INTEGER DEFAULT 0")
+    except: pass
     conn.commit(); conn.close()
 
 def get_db(): return sqlite3.connect(DB_PATH)
@@ -1294,26 +1296,27 @@ def dlv_my_route(msg):
     dlv=_get_delivery_agent_by_tid(uid)
     if not dlv:
         bot.send_message(uid,"❗ Bog'lanish topilmadi."); return
+    today=_today_kun()
+    if not today:
+        bot.send_message(uid,"😴 Bugun Yakshanba — dam olish kuni. Marshrut yo'q."); return
     conn=get_db();c=conn.cursor()
-    c.execute("""SELECT r.kun,r.tartib,d.nomi,d.egasi,d.telefon,d.hudud,d.latitude,d.longitude
+    c.execute("""SELECT r.tartib,d.nomi,d.egasi,d.telefon,d.hudud,d.latitude,d.longitude,
+                        COALESCE(r.added_by_dlv,0)
                  FROM delivery_routes r JOIN dokonlar d ON d.id=r.dokon_id
-                 WHERE r.delivery_agent_id=? AND d.holat='faol'
-                 ORDER BY r.kun,r.tartib""",(dlv[0],))
+                 WHERE r.delivery_agent_id=? AND r.kun=? AND d.holat='faol'
+                 ORDER BY r.tartib""",(dlv[0],today))
     rows=c.fetchall(); conn.close()
     if not rows:
-        bot.send_message(uid,"📭 Sizga marshrut belgilanmagan. Admin bilan bog'laning."); return
-    today=_today_kun()
-    text=f"🗺 MENING HAFTALIK MARSHRUTIM\n🚚 {dlv[1]}\n{'━'*26}\n"
-    cur_day=None
+        bot.send_message(uid,
+            f"📭 Bugun ({day_name(today)}) uchun marshrut yo'q.\n\n"
+            f"💡 \"📦 Tovar berish\" → \"➕ Yangi do'kon qo'shish\" orqali dokon qo'shing.")
+        return
+    text=f"🗺 BUGUNGI MARSHRUT\n🚚 {dlv[1]}\n📅 {day_name(today)}\n📦 {len(rows)} ta dokon\n{'━'*26}\n"
     for r in rows:
-        kun,tartib,nomi,egasi,tel,hud,lat,lon=r
-        if kun!=cur_day:
-            mark=" 👈 BUGUN" if kun==today else ""
-            text+=f"\n📅 {day_name(kun)}{mark}\n"
-            cur_day=kun
-        text+=f"  {tartib}. 🏪 {nomi} — 👤 {egasi or '—'} | 📞 {tel or '—'} | 📍 {hud or '—'}"
-        if lat and lon: text+=f"\n     🗺 https://maps.google.com/?q={lat},{lon}"
-        text+="\n"
+        tartib,nomi,egasi,tel,hud,lat,lon,added=r
+        mark=" ➕" if added else ""
+        text+=f"\n{tartib}. 🏪 {nomi}{mark}\n   👤 {egasi or '—'} | 📞 {tel or '—'} | 📍 {hud or '—'}"
+        if lat and lon: text+=f"\n   🗺 https://maps.google.com/?q={lat},{lon}"
     _send_long(uid,text)
 
 @bot.message_handler(func=lambda m:m.text=="👤 Profil")
@@ -1334,6 +1337,126 @@ def dlv_profile(msg):
         f"🚗 Mashina: {r[3] or '—'} | 🔢 {r[4] or '—'}\n"
         f"📍 Hudud: {r[5] or '—'}\n"
         f"🆔 Telegram: {uid}")
+
+# ───── DELIVERY AD-HOC DOKON ADD (max 5/day → today's route) ─────
+def _dlv_add_show_viloyat(uid):
+    conn=get_db();c=conn.cursor()
+    c.execute("""SELECT COALESCE(NULLIF(viloyat,''),'— Noma''lum') as v, COUNT(*) as n
+                 FROM dokonlar WHERE holat='faol' GROUP BY v ORDER BY n DESC""")
+    vils=c.fetchall(); conn.close()
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
+    row=[]
+    for v,n in vils:
+        row.append(f"📍 {v} ({n})")
+        if len(row)==2: kb.add(*row); row=[]
+    if row: kb.add(*row)
+    kb.add("⬅️ Marshrutga qaytish")
+    bot.send_message(uid,"📍 Viloyatni tanlang:",reply_markup=kb)
+
+@bot.message_handler(func=lambda m:m.text and m.text.startswith("➕ Yangi do'kon qo'shish"))
+def dlv_add_start(msg):
+    uid=msg.from_user.id; user=get_user(uid)
+    if not user or user[3]!="delivery": return
+    dlv=_get_delivery_agent_by_tid(uid)
+    if not dlv:
+        bot.send_message(uid,"❗ Bog'lanish topilmadi."); return
+    kun=_today_kun()
+    if not kun:
+        bot.send_message(uid,"😴 Bugun Yakshanba — marshrut yo'q."); return
+    if _dlv_adhoc_count(dlv[0],kun)>=DLV_ADHOC_MAX:
+        bot.send_message(uid,f"🚫 Bugungi limit to'ldi ({DLV_ADHOC_MAX}/{DLV_ADHOC_MAX}). Ertaga urinib ko'ring."); return
+    set_state(uid,"dlv_add_viloyat",{"dlv_id":dlv[0],"kun":kun})
+    _dlv_add_show_viloyat(uid)
+
+@bot.message_handler(func=lambda m:m.text and m.text.startswith("🚫 Qo'shish limiti"))
+def dlv_add_limit(msg):
+    uid=msg.from_user.id; user=get_user(uid)
+    if not user or user[3]!="delivery": return
+    bot.send_message(uid,f"🚫 Bugungi limit to'ldi ({DLV_ADHOC_MAX}/{DLV_ADHOC_MAX}). Ertaga urinib ko'ring.")
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="dlv_add_viloyat")
+def dlv_add_viloyat(msg):
+    uid=msg.from_user.id; txt=(msg.text or "").strip()
+    if txt=="⬅️ Marshrutga qaytish":
+        clear_state(uid); tovar_berish(msg); return
+    if not txt.startswith("📍 "): return
+    v=txt[2:].rsplit(" (",1)[0].strip()
+    data=get_state(uid)["data"]; data["viloyat"]=v
+    set_state(uid,"dlv_add_hudud",data)
+    conn=get_db();c=conn.cursor()
+    c.execute("""SELECT COALESCE(NULLIF(hudud,''),'— Noma''lum') as h, COUNT(*) as n
+                 FROM dokonlar WHERE holat='faol' AND
+                 (viloyat=? OR (viloyat IS NULL AND ?='— Noma''lum') OR (viloyat='' AND ?='— Noma''lum'))
+                 GROUP BY h ORDER BY n DESC""",(v,v,v))
+    huds=c.fetchall(); conn.close()
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
+    row=[]
+    for h,n in huds:
+        row.append(f"🏘 {h} ({n})")
+        if len(row)==2: kb.add(*row); row=[]
+    if row: kb.add(*row)
+    kb.add("⬅️ Viloyatga qaytish")
+    bot.send_message(uid,f"📍 {v}\n🏘 Hududni tanlang:",reply_markup=kb)
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="dlv_add_hudud")
+def dlv_add_hudud(msg):
+    uid=msg.from_user.id; txt=(msg.text or "").strip()
+    data=get_state(uid)["data"]
+    if txt=="⬅️ Viloyatga qaytish":
+        set_state(uid,"dlv_add_viloyat",{"dlv_id":data["dlv_id"],"kun":data["kun"]})
+        _dlv_add_show_viloyat(uid); return
+    if not txt.startswith("🏘 "): return
+    h=txt[2:].rsplit(" (",1)[0].strip()
+    data["hudud"]=h; v=data["viloyat"]
+    conn=get_db();c=conn.cursor()
+    c.execute("""SELECT id,nomi FROM dokonlar
+                 WHERE holat='faol'
+                 AND (viloyat=? OR (viloyat IS NULL AND ?='— Noma''lum') OR (viloyat='' AND ?='— Noma''lum'))
+                 AND (hudud=? OR (hudud IS NULL AND ?='— Noma''lum') OR (hudud='' AND ?='— Noma''lum'))
+                 AND id NOT IN (SELECT dokon_id FROM delivery_routes WHERE delivery_agent_id=? AND kun=?)
+                 ORDER BY nomi""",(v,v,v,h,h,h,data["dlv_id"],data["kun"]))
+    rows=c.fetchall(); conn.close()
+    if not rows:
+        bot.send_message(uid,"📭 Bu hududda yangi qo'shish mumkin bo'lgan dokon yo'q (hammasi marshrutda yoki yo'q).")
+        return
+    set_state(uid,"dlv_add_dokon",data)
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+    for d in rows: kb.add(f"🏪 {d[0]}||{d[1]}")
+    kb.add("⬅️ Hududni o'zgartirish","⬅️ Marshrutga qaytish")
+    bot.send_message(uid,f"📍 {v} > 🏘 {h}\n🏪 Dokonni tanlang:",reply_markup=kb)
+
+@bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="dlv_add_dokon")
+def dlv_add_dokon_pick(msg):
+    uid=msg.from_user.id; txt=(msg.text or "").strip()
+    data=get_state(uid)["data"]
+    if txt=="⬅️ Marshrutga qaytish":
+        clear_state(uid); tovar_berish(msg); return
+    if txt=="⬅️ Hududni o'zgartirish":
+        set_state(uid,"dlv_add_viloyat",{"dlv_id":data["dlv_id"],"kun":data["kun"]})
+        _dlv_add_show_viloyat(uid); return
+    if not txt.startswith("🏪 "): return
+    try: did=int(txt[2:].split("||")[0])
+    except: return
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT COUNT(*) FROM delivery_routes WHERE delivery_agent_id=? AND kun=? AND COALESCE(added_by_dlv,0)=1",(data["dlv_id"],data["kun"]))
+    added=c.fetchone()[0]
+    if added>=DLV_ADHOC_MAX:
+        conn.close()
+        bot.send_message(uid,f"🚫 Limit to'ldi ({DLV_ADHOC_MAX}/{DLV_ADHOC_MAX}).")
+        clear_state(uid); tovar_berish(msg); return
+    c.execute("SELECT COALESCE(MAX(tartib),0)+1 FROM delivery_routes WHERE delivery_agent_id=? AND kun=?",(data["dlv_id"],data["kun"]))
+    tartib=c.fetchone()[0]
+    try:
+        c.execute("""INSERT INTO delivery_routes (delivery_agent_id,kun,dokon_id,tartib,created_at,added_by_dlv)
+                     VALUES (?,?,?,?,?,1)""",(data["dlv_id"],data["kun"],did,tartib,datetime.now().isoformat()))
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        bot.send_message(uid,f"❗ Xato: {e}"); return
+    c.execute("SELECT nomi FROM dokonlar WHERE id=?",(did,))
+    nm=c.fetchone()[0]; conn.close()
+    bot.send_message(uid,f"✅ '{nm}' bugungi marshrutga qo'shildi ({added+1}/{DLV_ADHOC_MAX}).")
+    clear_state(uid); tovar_berish(msg)
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="reg_name")
 def reg_name(msg):
@@ -1858,27 +1981,38 @@ def _today_kun():
     iw=datetime.now().isoweekday()
     return iw if 1<=iw<=6 else None
 
+DLV_ADHOC_MAX=5
+
+def _dlv_adhoc_count(dlv_id, kun):
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT COUNT(*) FROM delivery_routes WHERE delivery_agent_id=? AND kun=? AND COALESCE(added_by_dlv,0)=1",(dlv_id,kun))
+    n=c.fetchone()[0]; conn.close(); return n
+
 def _delivery_today_dokon_kb(uid):
-    """For delivery agent: today's route dokons, 2 columns, ordered by tartib."""
+    """For delivery agent: today's route dokons + ➕ add button (max 5/day)."""
     dlv=_get_delivery_agent_by_tid(uid)
-    if not dlv: return None,0,"no_agent"
+    if not dlv: return None,0,0,"no_agent"
     kun=_today_kun()
-    if not kun: return None,0,"sunday"
+    if not kun: return None,0,0,"sunday"
     conn=get_db();c=conn.cursor()
     c.execute("""SELECT d.id,d.nomi FROM delivery_routes r
                  JOIN dokonlar d ON d.id=r.dokon_id
                  WHERE r.delivery_agent_id=? AND r.kun=? AND d.holat='faol'
                  ORDER BY r.tartib""",(dlv[0],kun))
     rows=c.fetchall(); conn.close()
-    if not rows: return None,0,"empty"
+    added=_dlv_adhoc_count(dlv[0],kun)
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
     pair=[]
     for d in rows:
         pair.append(f"🏪 {d[0]}||{d[1]}")
         if len(pair)==2: kb.add(*pair); pair=[]
     if pair: kb.add(*pair)
+    if added<DLV_ADHOC_MAX:
+        kb.add(f"➕ Yangi do'kon qo'shish ({added}/{DLV_ADHOC_MAX})")
+    else:
+        kb.add(f"🚫 Qo'shish limiti ({added}/{DLV_ADHOC_MAX})")
     kb.add("❌ Bekor qilish")
-    return kb,len(rows),"ok"
+    return kb,len(rows),added,"ok"
 
 def _bosh_dokon_kb(uid):
     """For bosh agent: list dokons ordered by created_at DESC (newest first), 2 columns."""
@@ -1976,19 +2110,24 @@ def tovar_berish(msg):
     if not mahsulotlar: bot.send_message(uid,"❗ Mahsulotlar yo'q."); return
     # Delivery agent: today's route only
     if user[3]=="delivery":
-        kb,n,status=_delivery_today_dokon_kb(uid)
+        kb,n,added,status=_delivery_today_dokon_kb(uid)
         if status=="no_agent":
             bot.send_message(uid,"❗ Siz delivery agent sifatida bog'lanmagansiz."); return
         if status=="sunday":
             bot.send_message(uid,"😴 Bugun Yakshanba — dam olish kuni. Marshrut yo'q."); return
-        if status=="empty":
-            bot.send_message(uid,f"📭 Bugun ({day_name(_today_kun())}) uchun marshrut yo'q.\n\nAdmin marshrut yaratishi kerak."); return
         set_state(uid,"savdo_dokon",{"mahsulotlar":mahsulotlar,"tanlangan":{}})
-        bot.send_message(uid,
-            f"🚚 BUGUN — {day_name(_today_kun())}\n"
-            f"📦 Marshrutda {n} ta dokon\n\n"
-            f"🏪 Dokonni tanlang:",
-            reply_markup=kb)
+        if n==0:
+            bot.send_message(uid,
+                f"🚚 BUGUN — {day_name(_today_kun())}\n"
+                f"📭 Marshrutda dokon yo'q.\n\n"
+                f"➕ Yangi do'kon qo'shish orqali boshlang ({added}/{DLV_ADHOC_MAX}):",
+                reply_markup=kb)
+        else:
+            bot.send_message(uid,
+                f"🚚 BUGUN — {day_name(_today_kun())}\n"
+                f"📦 Marshrutda {n} ta dokon | ➕ Qo'shilgan: {added}/{DLV_ADHOC_MAX}\n\n"
+                f"🏪 Dokonni tanlang:",
+                reply_markup=kb)
         return
     kb,n=_bosh_dokon_kb(uid)
     if n==0: bot.send_message(uid,"❗ Faol dokon yo'q."); return
