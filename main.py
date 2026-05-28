@@ -1254,6 +1254,40 @@ def _next_kb():
     kb.add("❌ Bekor qilish")
     return kb
 
+def _savdo_dokon_kb(uid, query=None, limit=20):
+    """Build dokon picker keyboard. If query: LIKE filter. Else: recent 5 dokons."""
+    conn=get_db();c=conn.cursor()
+    admin_mode=is_admin(uid)
+    if query:
+        like=f"%{query}%"
+        if admin_mode:
+            c.execute("""SELECT id,nomi FROM dokonlar
+                         WHERE holat='faol' AND (nomi LIKE ? OR egasi LIKE ? OR telefon LIKE ?)
+                         ORDER BY nomi LIMIT ?""",(like,like,like,limit))
+        else:
+            c.execute("""SELECT id,nomi FROM dokonlar
+                         WHERE agent_id=? AND holat='faol' AND (nomi LIKE ? OR egasi LIKE ? OR telefon LIKE ?)
+                         ORDER BY nomi LIMIT ?""",(uid,like,like,like,limit))
+        rows=c.fetchall(); label_hint=f"🔍 '{query}' bo'yicha topildi: {len(rows)} ta"
+    else:
+        # Recent 5 dokons used by this agent (or all for admin)
+        if admin_mode:
+            c.execute("""SELECT d.id,d.nomi FROM dokonlar d
+                         JOIN savdolar s ON s.dokon_id=d.id
+                         WHERE d.holat='faol'
+                         GROUP BY d.id ORDER BY MAX(s.created_at) DESC LIMIT 5""")
+        else:
+            c.execute("""SELECT d.id,d.nomi FROM dokonlar d
+                         JOIN savdolar s ON s.dokon_id=d.id
+                         WHERE d.agent_id=? AND d.holat='faol'
+                         GROUP BY d.id ORDER BY MAX(s.created_at) DESC LIMIT 5""",(uid,))
+        rows=c.fetchall(); label_hint="🕐 Oxirgi 5 dokon (yoki nom yozib qidiring)"
+    conn.close()
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+    for d in rows: kb.add(f"🏪 {d[0]}||{d[1]}")
+    kb.add("❌ Bekor qilish")
+    return kb, label_hint, len(rows)
+
 @bot.message_handler(func=lambda m:m.text=="📦 Tovar berish")
 def tovar_berish(msg):
     uid=msg.from_user.id; user=get_user(uid)
@@ -1261,32 +1295,45 @@ def tovar_berish(msg):
     if check_pending(uid): return
     conn=get_db();c=conn.cursor()
     if is_admin(uid):
-        c.execute("SELECT id,nomi FROM dokonlar WHERE holat='faol' ORDER BY nomi")
+        c.execute("SELECT COUNT(*) FROM dokonlar WHERE holat='faol'")
     else:
-        c.execute("SELECT id,nomi FROM dokonlar WHERE agent_id=? AND holat='faol' ORDER BY nomi",(uid,))
-    dokonlar=c.fetchall()
+        c.execute("SELECT COUNT(*) FROM dokonlar WHERE agent_id=? AND holat='faol'",(uid,))
+    dokon_n=c.fetchone()[0]
     c.execute("SELECT id,nomi,narx,birlik FROM mahsulotlar WHERE faol=1 ORDER BY nomi")
     mahsulotlar=c.fetchall(); conn.close()
-    if not dokonlar: bot.send_message(uid,"❗ Faol dokon yo'q."); return
+    if dokon_n==0: bot.send_message(uid,"❗ Faol dokon yo'q."); return
     if not mahsulotlar: bot.send_message(uid,"❗ Mahsulotlar yo'q."); return
-    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
-    for d in dokonlar: kb.add(f"🏪 {d[0]}||{d[1]}")
-    kb.add("❌ Bekor qilish")
     set_state(uid,"savdo_dokon",{"mahsulotlar":mahsulotlar,"tanlangan":{}})
-    bot.send_message(uid,"🏪 Dokonni tanlang:",reply_markup=kb)
+    kb,hint,_=_savdo_dokon_kb(uid)
+    bot.send_message(uid,
+        f"🏪 DOKONNI TANLANG ({dokon_n} ta faol)\n\n"
+        f"💡 Dokon nomini, egasini yoki telefonini yozib qidiring\n"
+        f"Masalan: <code>Fayz</code>\n\n{hint}",
+        parse_mode="HTML",reply_markup=kb)
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="savdo_dokon")
 def s_savdo_dokon(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
-    if not msg.text.startswith("🏪 "): return
-    try:
-        did,dnomi=msg.text.replace("🏪 ","").split("||",1)
-        data["dokon_id"]=int(did); data["dokon_nomi"]=dnomi
-    except: return
-    set_state(uid,"savdo_pick_mah",data)
-    bot.send_message(uid,
-        f"🏪 {data['dokon_nomi']}\n\n📦 Mahsulot tanlang:",
-        reply_markup=_mah_list_kb(data["mahsulotlar"],data["tanlangan"]))
+    txt=(msg.text or "").strip()
+    # If user picked a dokon from the list
+    if txt.startswith("🏪 ") and "||" in txt:
+        try:
+            did,dnomi=txt.replace("🏪 ","").split("||",1)
+            data["dokon_id"]=int(did); data["dokon_nomi"]=dnomi
+        except: return
+        set_state(uid,"savdo_pick_mah",data)
+        bot.send_message(uid,
+            f"🏪 {data['dokon_nomi']}\n\n📦 Mahsulot tanlang:",
+            reply_markup=_mah_list_kb(data["mahsulotlar"],data["tanlangan"]))
+        return
+    # Otherwise treat as search query
+    if len(txt)<2:
+        bot.send_message(uid,"❗ Kamida 2 ta belgi kiriting."); return
+    kb,hint,n=_savdo_dokon_kb(uid,query=txt)
+    if n==0:
+        kb2,hint2,_=_savdo_dokon_kb(uid)
+        bot.send_message(uid,f"❌ '{txt}' bo'yicha topilmadi.\n\n{hint2}",reply_markup=kb2); return
+    bot.send_message(uid,f"{hint}\n\nDokonni tanlang yoki boshqa nom yozing:",reply_markup=kb)
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="savdo_pick_mah")
 def s_savdo_pick_mah(msg):
