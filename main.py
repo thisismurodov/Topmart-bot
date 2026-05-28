@@ -1135,7 +1135,7 @@ def fmt_miq(q):
 def main_kb(role):
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
     if role=="delivery":
-        kb.add("📦 Tovar berish")
+        kb.add("📦 Tovar berish","❌ Tovar olmadi")
         kb.add("🗺 Mening marshrutim","👤 Profil")
         return kb
     if role in("agent","supervisor","admin"):
@@ -2798,6 +2798,25 @@ def tovar_olmadi(msg):
     if not user: return
     if check_pending(uid): return
     conn=get_db();c=conn.cursor()
+    if user[3]=="delivery":
+        dlv=_get_delivery_agent_by_tid(uid)
+        if not dlv:
+            conn.close(); bot.send_message(uid,"❗ Bog'lanish topilmadi."); return
+        kun=_today_kun()
+        if not kun:
+            conn.close(); bot.send_message(uid,"😴 Bugun Yakshanba — marshrut yo'q."); return
+        c.execute("""SELECT d.id,d.nomi FROM delivery_routes r
+                     JOIN dokonlar d ON d.id=r.dokon_id
+                     WHERE r.delivery_agent_id=? AND r.kun=? AND d.holat='faol'
+                     ORDER BY r.tartib""",(dlv[0],kun))
+        dokonlar=c.fetchall(); conn.close()
+        if not dokonlar:
+            bot.send_message(uid,f"📭 Bugun ({day_name(kun)}) marshrutda dokon yo'q."); return
+        kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+        for d in dokonlar: kb.add(f"🏪 {d[0]}||{d[1]}")
+        kb.add("❌ Bekor qilish")
+        set_state(uid,"olmadi_dokon",{})
+        bot.send_message(uid,f"🚚 BUGUN — {day_name(kun)}\n🏪 Qaysi dokon tovar olmadi?",reply_markup=kb); return
     if is_admin(uid):
         c.execute("SELECT id,nomi FROM dokonlar ORDER BY nomi")
     else:
