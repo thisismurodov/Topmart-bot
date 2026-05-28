@@ -2954,24 +2954,49 @@ def oylik_cmd(msg):
     except Exception as e:
         bot.send_message(msg.from_user.id,f"❗ Oylik hisobot xatosi: {e}")
 
+def _build_multistop_maps_url(items):
+    """Build a Google Maps directions URL with multiple waypoints (up to ~9)."""
+    coords=[(r[6],r[7]) for r in items if r[6] and r[7]]
+    if not coords: return None
+    coords=coords[:10]  # Google Maps limit
+    if len(coords)==1:
+        return f"https://maps.google.com/?q={coords[0][0]},{coords[0][1]}"
+    base="https://www.google.com/maps/dir/?api=1"
+    dest=f"{coords[-1][0]},{coords[-1][1]}"
+    waypoints="|".join(f"{lat},{lon}" for lat,lon in coords[:-1])
+    return f"{base}&destination={dest}&waypoints={waypoints}&travelmode=driving"
+
 def _format_agent_section(agent_name, items, with_header=True):
-    """Build a per-agent revisit block."""
+    """Build a per-agent revisit block, grouped by viloyat → hudud."""
     text=""
     if with_header:
         text=f"📋 BUGUN KIRILADIGAN DOKONLAR\n\n👤 Agent: {agent_name}\n{'━'*26}\n"
     else:
         text=f"\n👤 Agent: {agent_name}  ({len(items)} ta)\n{'━'*26}\n"
-    for i,r in enumerate(items,1):
-        _,_,nomi,egasi,vil,hudud,lat,lon,last_d,_,_ = r
-        maps=f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "—"
-        last_s=last_d[:10] if last_d else "—"
-        text+=(f"\n{i}️⃣ DO'KON\n"
-               f"🏪 {nomi}\n"
-               f"👤 {egasi or '—'}\n"
-               f"📍 {vil or '—'} | {hudud or '—'}\n"
-               f"📅 Oxirgi savdo: {last_s}\n"
-               f"🗺 {maps}\n"
-               f"{'━'*26}\n")
+    # Group by viloyat → hudud
+    from collections import defaultdict
+    by_vil=defaultdict(lambda: defaultdict(list))
+    for r in items:
+        vil=r[4] or "—"; hud=r[5] or "—"
+        by_vil[vil][hud].append(r)
+    idx=0
+    for vil, huds in by_vil.items():
+        v_total=sum(len(v) for v in huds.values())
+        text+=f"\n📍 {vil.upper()} ({v_total} ta)\n"
+        for hud, rows in huds.items():
+            text+=f"\n  🏘 {hud} ({len(rows)} ta):\n"
+            for r in rows:
+                idx+=1
+                _,_,nomi,egasi,_,_,lat,lon,last_d,_,_ = r
+                maps=f"https://maps.google.com/?q={lat},{lon}" if lat and lon else "—"
+                last_s=last_d[:10] if last_d else "—"
+                text+=(f"    {idx}. 🏪 {nomi}\n"
+                       f"       👤 {egasi or '—'} | 📅 {last_s}\n"
+                       f"       🗺 {maps}\n")
+    # Multi-stop route link
+    route=_build_multistop_maps_url(items)
+    if route:
+        text+=f"\n{'━'*26}\n🚗 MARSHRUT (ko'p to'xtash): {route}\n"
     return text
 
 def _send_long(chat_id, text):
