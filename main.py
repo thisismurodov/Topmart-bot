@@ -1132,6 +1132,10 @@ def fmt_miq(q):
 
 def main_kb(role):
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
+    if role=="delivery":
+        kb.add("📦 Tovar berish")
+        kb.add("🗺 Mening marshrutim","👤 Profil")
+        return kb
     if role in("agent","supervisor","admin"):
         kb.add("🏪 Yangi dokon","📦 Tovar berish")
         kb.add("💰 Pul olish","❌ Tovar olmadi")
@@ -1186,11 +1190,150 @@ def cancel_h(msg):
 @bot.message_handler(commands=["start"])
 def cmd_start(msg):
     uid=msg.from_user.id; user=get_user(uid)
+    # Auto-detect already-linked delivery agent
+    dlv=_get_delivery_agent_by_tid(uid)
+    if dlv and (not user or user[3]!="delivery"):
+        _ensure_delivery_user(uid, dlv[1])
+        user=get_user(uid)
     if not user:
-        set_state(uid,"reg_name")
-        bot.send_message(uid,"👋 TOP MART botiga xush kelibsiz!\n\nIsmingizni kiriting:",reply_markup=types.ReplyKeyboardRemove())
+        # Offer role choice
+        kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+        kb.add("👤 Men sotuvchi / agent")
+        kb.add("🚚 Men delivery agent")
+        bot.send_message(uid,"👋 TOP MART botiga xush kelibsiz!\n\nKim sifatida kirasiz?",reply_markup=kb)
+        return
+    bot.send_message(uid,f"✅ Xush kelibsiz, {user[2]}!\n🔰 Rol: {user[3].upper()}",reply_markup=main_kb(user[3]))
+
+@bot.message_handler(func=lambda m:m.text=="👤 Men sotuvchi / agent" and not get_user(m.from_user.id))
+def role_pick_agent(msg):
+    uid=msg.from_user.id
+    set_state(uid,"reg_name")
+    bot.send_message(uid,"👤 Ismingizni kiriting:",reply_markup=types.ReplyKeyboardRemove())
+
+@bot.message_handler(func=lambda m:m.text=="🚚 Men delivery agent" and not get_user(m.from_user.id))
+def role_pick_delivery(msg):
+    uid=msg.from_user.id
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(types.KeyboardButton("📱 Telefon raqamni yuborish",request_contact=True))
+    kb.add("❌ Bekor qilish")
+    set_state(uid,"dlv_link_phone",{})
+    bot.send_message(uid,
+        "🚚 Delivery agent kirishi\n\n"
+        "Admin sizni bazaga qo'shgan bo'lishi kerak.\n\n"
+        "📱 Tasdiqlash uchun telefon raqamingizni yuboring:",
+        reply_markup=kb)
+
+def _normalize_phone(s):
+    if not s: return ""
+    return "".join(ch for ch in s if ch.isdigit())[-9:]  # last 9 digits
+
+def _ensure_delivery_user(tid, name):
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT role FROM users WHERE telegram_id=?",(tid,))
+    r=c.fetchone()
+    if r:
+        if r[0]!="delivery":
+            c.execute("UPDATE users SET role='delivery',name=? WHERE telegram_id=?",(name,tid))
     else:
-        bot.send_message(uid,f"✅ Xush kelibsiz, {user[2]}!\n🔰 Rol: {user[3].upper()}",reply_markup=main_kb(user[3]))
+        c.execute("INSERT INTO users (telegram_id,name,role,viloyat,created_at) VALUES (?,?,?,?,?)",
+                  (tid,name,"delivery","",datetime.now().isoformat()))
+    conn.commit(); conn.close()
+
+@bot.message_handler(content_types=["contact"],
+    func=lambda m:get_state(m.from_user.id)["state"]=="dlv_link_phone")
+def dlv_link_phone(msg):
+    uid=msg.from_user.id
+    if not msg.contact or msg.contact.user_id!=uid:
+        bot.send_message(uid,"❗ Iltimos o'zingizning telefoningizni yuboring (tugma orqali)."); return
+    phone_norm=_normalize_phone(msg.contact.phone_number)
+    if not phone_norm:
+        bot.send_message(uid,"❗ Telefon o'qib bo'lmadi."); return
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT id,name,telefon,telegram_id FROM delivery_agents WHERE faol=1")
+    rows=c.fetchall(); conn.close()
+    match=None
+    for r in rows:
+        if _normalize_phone(r[2])==phone_norm:
+            match=r; break
+    if not match:
+        clear_state(uid)
+        bot.send_message(uid,
+            "❗ Sizning raqamingiz bazada topilmadi.\n\n"
+            "📞 Admin bilan bog'laning va ro'yxatga kiritilishingizni so'rang.",
+            reply_markup=types.ReplyKeyboardRemove())
+        return
+    did,name,tel,existing_tid=match
+    if existing_tid and existing_tid!=uid:
+        clear_state(uid)
+        bot.send_message(uid,
+            f"❗ '{name}' allaqachon boshqa telegram hisobiga bog'langan.\n"
+            f"Admin bilan bog'laning.",
+            reply_markup=types.ReplyKeyboardRemove())
+        return
+    # Link
+    conn=get_db();c=conn.cursor()
+    c.execute("UPDATE delivery_agents SET telegram_id=? WHERE id=?",(uid,did))
+    conn.commit(); conn.close()
+    _ensure_delivery_user(uid, name)
+    clear_state(uid)
+    bot.send_message(uid,
+        f"✅ Tabriklaymiz, {name}!\n"
+        f"🚚 Siz delivery agent sifatida kirdingiz.\n\n"
+        f"📦 Tovar berish — bugungi marshrutingiz\n"
+        f"🗺 Mening marshrutim — haftalik reja",
+        reply_markup=main_kb("delivery"))
+    # Notify admins
+    for aid in all_admin_ids():
+        try: bot.send_message(aid,f"🔗 Delivery agent ulandi:\n👤 {name}\n📞 {tel}\n🆔 {uid}")
+        except: pass
+
+@bot.message_handler(func=lambda m:m.text=="🗺 Mening marshrutim")
+def dlv_my_route(msg):
+    uid=msg.from_user.id; user=get_user(uid)
+    if not user or user[3]!="delivery": return
+    dlv=_get_delivery_agent_by_tid(uid)
+    if not dlv:
+        bot.send_message(uid,"❗ Bog'lanish topilmadi."); return
+    conn=get_db();c=conn.cursor()
+    c.execute("""SELECT r.kun,r.tartib,d.nomi,d.egasi,d.telefon,d.hudud,d.latitude,d.longitude
+                 FROM delivery_routes r JOIN dokonlar d ON d.id=r.dokon_id
+                 WHERE r.delivery_agent_id=? AND d.holat='faol'
+                 ORDER BY r.kun,r.tartib""",(dlv[0],))
+    rows=c.fetchall(); conn.close()
+    if not rows:
+        bot.send_message(uid,"📭 Sizga marshrut belgilanmagan. Admin bilan bog'laning."); return
+    today=_today_kun()
+    text=f"🗺 MENING HAFTALIK MARSHRUTIM\n🚚 {dlv[1]}\n{'━'*26}\n"
+    cur_day=None
+    for r in rows:
+        kun,tartib,nomi,egasi,tel,hud,lat,lon=r
+        if kun!=cur_day:
+            mark=" 👈 BUGUN" if kun==today else ""
+            text+=f"\n📅 {day_name(kun)}{mark}\n"
+            cur_day=kun
+        text+=f"  {tartib}. 🏪 {nomi} — 👤 {egasi or '—'} | 📞 {tel or '—'} | 📍 {hud or '—'}"
+        if lat and lon: text+=f"\n     🗺 https://maps.google.com/?q={lat},{lon}"
+        text+="\n"
+    _send_long(uid,text)
+
+@bot.message_handler(func=lambda m:m.text=="👤 Profil")
+def dlv_profile(msg):
+    uid=msg.from_user.id; user=get_user(uid)
+    if not user or user[3]!="delivery": return
+    conn=get_db();c=conn.cursor()
+    c.execute("""SELECT name,telefon,tugilgan_kun,mashina_turi,mashina_nomeri,hudud
+                 FROM delivery_agents WHERE telegram_id=? AND faol=1""",(uid,))
+    r=c.fetchone(); conn.close()
+    if not r:
+        bot.send_message(uid,"❗ Profil topilmadi."); return
+    bot.send_message(uid,
+        f"👤 PROFIL\n{'━'*22}\n"
+        f"Ism: {r[0]}\n"
+        f"📞 Telefon: {r[1] or '—'}\n"
+        f"🎂 Tug'ilgan: {r[2] or '—'}\n"
+        f"🚗 Mashina: {r[3] or '—'} | 🔢 {r[4] or '—'}\n"
+        f"📍 Hudud: {r[5] or '—'}\n"
+        f"🆔 Telegram: {uid}")
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="reg_name")
 def reg_name(msg):
@@ -1705,6 +1848,38 @@ def _scope_clause(uid):
     if is_admin(uid): return "", ()
     return " AND agent_id=?", (uid,)
 
+def _get_delivery_agent_by_tid(tid):
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT id,name,telefon,hudud FROM delivery_agents WHERE telegram_id=? AND faol=1",(tid,))
+    r=c.fetchone(); conn.close(); return r
+
+def _today_kun():
+    """Returns 1=Du..6=Sh, or None if Sunday."""
+    iw=datetime.now().isoweekday()
+    return iw if 1<=iw<=6 else None
+
+def _delivery_today_dokon_kb(uid):
+    """For delivery agent: today's route dokons, 2 columns, ordered by tartib."""
+    dlv=_get_delivery_agent_by_tid(uid)
+    if not dlv: return None,0,"no_agent"
+    kun=_today_kun()
+    if not kun: return None,0,"sunday"
+    conn=get_db();c=conn.cursor()
+    c.execute("""SELECT d.id,d.nomi FROM delivery_routes r
+                 JOIN dokonlar d ON d.id=r.dokon_id
+                 WHERE r.delivery_agent_id=? AND r.kun=? AND d.holat='faol'
+                 ORDER BY r.tartib""",(dlv[0],kun))
+    rows=c.fetchall(); conn.close()
+    if not rows: return None,0,"empty"
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
+    pair=[]
+    for d in rows:
+        pair.append(f"🏪 {d[0]}||{d[1]}")
+        if len(pair)==2: kb.add(*pair); pair=[]
+    if pair: kb.add(*pair)
+    kb.add("❌ Bekor qilish")
+    return kb,len(rows),"ok"
+
 def _bosh_dokon_kb(uid):
     """For bosh agent: list dokons ordered by created_at DESC (newest first), 2 columns."""
     conn=get_db();c=conn.cursor()
@@ -1799,6 +1974,22 @@ def tovar_berish(msg):
     c.execute("SELECT id,nomi,narx,birlik FROM mahsulotlar WHERE faol=1 ORDER BY nomi")
     mahsulotlar=c.fetchall(); conn.close()
     if not mahsulotlar: bot.send_message(uid,"❗ Mahsulotlar yo'q."); return
+    # Delivery agent: today's route only
+    if user[3]=="delivery":
+        kb,n,status=_delivery_today_dokon_kb(uid)
+        if status=="no_agent":
+            bot.send_message(uid,"❗ Siz delivery agent sifatida bog'lanmagansiz."); return
+        if status=="sunday":
+            bot.send_message(uid,"😴 Bugun Yakshanba — dam olish kuni. Marshrut yo'q."); return
+        if status=="empty":
+            bot.send_message(uid,f"📭 Bugun ({day_name(_today_kun())}) uchun marshrut yo'q.\n\nAdmin marshrut yaratishi kerak."); return
+        set_state(uid,"savdo_dokon",{"mahsulotlar":mahsulotlar,"tanlangan":{}})
+        bot.send_message(uid,
+            f"🚚 BUGUN — {day_name(_today_kun())}\n"
+            f"📦 Marshrutda {n} ta dokon\n\n"
+            f"🏪 Dokonni tanlang:",
+            reply_markup=kb)
+        return
     kb,n=_bosh_dokon_kb(uid)
     if n==0: bot.send_message(uid,"❗ Faol dokon yo'q."); return
     set_state(uid,"savdo_dokon",{"mahsulotlar":mahsulotlar,"tanlangan":{}})
