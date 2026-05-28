@@ -240,6 +240,86 @@ def repeat_hisoboti(msg):
     if not is_admin(uid): return
     _send_repeat_report(uid)
 
+def _build_lost_dokons_report(scope_agent_id=None):
+    """Return text + counts for 'lost' (silent) dokons report.
+    scope_agent_id=None → admin (barcha agentlar). Aks holda — bitta agent."""
+    from datetime import datetime as _dt
+    conn=get_db();c=conn.cursor()
+    if scope_agent_id:
+        c.execute("""SELECT d.id,d.nomi,d.viloyat,d.hudud,d.last_order_date,d.created_at,d.agent_id,
+                            COALESCE(u.name,'—'),d.total_orders
+                     FROM dokonlar d LEFT JOIN users u ON u.telegram_id=d.agent_id
+                     WHERE d.holat='faol' AND d.agent_id=?""",(scope_agent_id,))
+    else:
+        c.execute("""SELECT d.id,d.nomi,d.viloyat,d.hudud,d.last_order_date,d.created_at,d.agent_id,
+                            COALESCE(u.name,'—'),d.total_orders
+                     FROM dokonlar d LEFT JOIN users u ON u.telegram_id=d.agent_id
+                     WHERE d.holat='faol'""")
+    rows=c.fetchall(); conn.close()
+    now=_dt.now()
+    # Buckets
+    new_no_sale=[]  # registered 14+ days ago, never bought
+    yellow=[]  # 30-60 days silent
+    orange=[]  # 60-90 days
+    red=[]     # 90+ days
+    for did,nomi,vil,hudud,last_d,created_at,agent_id,agent_name,total_o in rows:
+        if not last_d or (total_o or 0)==0:
+            try:
+                cr=_dt.fromisoformat(created_at) if created_at else None
+                if cr and (now-cr).days>=14:
+                    new_no_sale.append((did,nomi,vil,agent_name,(now-cr).days,"yangi"))
+            except: pass
+            continue
+        try:
+            ld=_dt.fromisoformat(last_d); days=(now-ld).days
+        except: continue
+        rec=(did,nomi,vil,agent_name,days,last_d[:10])
+        if days>=90: red.append(rec)
+        elif days>=60: orange.append(rec)
+        elif days>=30: yellow.append(rec)
+    # Sort each desc by days
+    for lst in (red,orange,yellow,new_no_sale): lst.sort(key=lambda x:-x[4])
+    title="⚠️ YO'QOLAYOTGAN DOKONLAR" + (f"\n👤 {scope_agent_id}" if scope_agent_id else " (BARCHA)")
+    text=(f"{title}\n{'━'*26}\n"
+          f"🔴 90+ kun jim: {len(red)} ta\n"
+          f"🟠 60-90 kun: {len(orange)} ta\n"
+          f"🟡 30-60 kun: {len(yellow)} ta\n"
+          f"⚪ Yangi (savdo yo'q): {len(new_no_sale)} ta\n")
+    def _fmt_block(emoji, label, items, limit=15):
+        if not items: return ""
+        s=f"\n{'━'*26}\n{emoji} {label} ({len(items)} ta):\n"
+        for did,nomi,vil,aname,days,extra in items[:limit]:
+            if scope_agent_id:
+                s+=f"  • {nomi} ({vil or '—'}) — {days} kun\n"
+            else:
+                s+=f"  • {nomi} ({vil or '—'}, {aname}) — {days} kun\n"
+        if len(items)>limit:
+            s+=f"  … +{len(items)-limit} ta\n"
+        return s
+    text+=_fmt_block("🔴","KRITIK (90+ kun)",red)
+    text+=_fmt_block("🟠","XAVFLI (60-90 kun)",orange)
+    text+=_fmt_block("🟡","DIQQAT (30-60 kun)",yellow)
+    text+=_fmt_block("⚪","YANGI — savdo yo'q",new_no_sale)
+    total=len(red)+len(orange)+len(yellow)+len(new_no_sale)
+    if total==0:
+        text+=f"\n{'━'*26}\n✅ Hammasi joyida! Yo'qolayotgan dokon yo'q."
+    return text,total
+
+@bot.message_handler(func=lambda m:m.text=="⚠️ Yo'qolayotgan dokonlar")
+def yoqolayotgan_dokonlar(msg):
+    uid=msg.from_user.id
+    if not is_admin(uid): return
+    text,_=_build_lost_dokons_report()
+    _send_long(uid, text)
+
+def send_weekly_lost_alert():
+    """Cron: har dushanba 09:00 — adminlarga yo'qolayotgan dokonlar hisoboti."""
+    text,total=_build_lost_dokons_report()
+    if total==0: return
+    header="📊 HAFTALIK OGOHLANTIRISH\n\n"
+    for aid in all_admin_ids():
+        _send_long(aid, header+text)
+
 def update_dokon_repeat(c, dokon_id, jami_summa):
     """Repeat System: update store stats after each new order."""
     from datetime import datetime as _dt
@@ -295,7 +375,7 @@ def main_kb(role):
         kb.add("📈 Umumiy stat","🛍 Mahsulotlar")
         kb.add("👥 Mijozlar bazasi","👤 Agent boshqaruv")
         kb.add("📄 Dokonlar PDF","📢 Xabar yuborish")
-        kb.add("🔁 Repeat hisoboti")
+        kb.add("🔁 Repeat hisoboti","⚠️ Yo'qolayotgan dokonlar")
     return kb
 def cancel_kb():
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -2669,12 +2749,14 @@ def run_scheduler():
     try:
         schedule.every().day.at("08:00", tz).do(send_daily_report)
         schedule.every().day.at("07:00", tz).do(send_today_revisits)
-        print(f"⏰ Scheduler started (TZ={tz}): daily_report 08:00, revisits 07:00")
+        schedule.every().monday.at("09:00", tz).do(send_weekly_lost_alert)
+        print(f"⏰ Scheduler started (TZ={tz}): daily 08:00, revisits 07:00, lost-alert Mon 09:00")
     except TypeError:
         # Old `schedule` lib — convert manually (Tashkent = UTC+5)
         schedule.every().day.at("03:00").do(send_daily_report)   # 08:00 Tashkent
         schedule.every().day.at("02:00").do(send_today_revisits) # 07:00 Tashkent
-        print("⏰ Scheduler started (UTC fallback): daily_report 03:00 UTC, revisits 02:00 UTC")
+        schedule.every().monday.at("04:00").do(send_weekly_lost_alert) # 09:00 Tashkent
+        print("⏰ Scheduler started (UTC fallback): daily 03:00, revisits 02:00, lost-alert Mon 04:00 UTC")
     while True:
         schedule.run_pending()
         time.sleep(30)
