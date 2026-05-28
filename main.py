@@ -505,7 +505,7 @@ def send_monthly_rating_if_last_day():
         try: _send_long(tid,text)
         except: pass
 
-# ───────────── DELIVERY AGENT CRUD ─────────────
+# ───────────── DELIVERY AGENT CRUD (with hard-delete) ─────────────
 DLV_FIELDS=[("name","👤 Ism-familiya"),
             ("telefon","📞 Telefon raqami (masalan: +998901234567)"),
             ("tugilgan_kun","🎂 Tug'ilgan kuni (DD.MM.YYYY, masalan: 15.03.1990)"),
