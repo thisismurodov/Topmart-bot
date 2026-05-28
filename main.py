@@ -414,6 +414,75 @@ def send_weekly_old_nasiya_alert():
             try: _send_long(aid, "💸 SIZNING MUDDATLI NASIYALARINGIZ\n\n"+atext)
             except: pass
 
+# ───────────── OYLIK REYTING ─────────────
+def _build_monthly_rating(oy=None):
+    """Returns text for monthly top-agents rating."""
+    if oy is None: oy=datetime.now().strftime("%Y-%m")
+    conn=get_db();c=conn.cursor()
+    c.execute("""SELECT u.telegram_id,u.name,u.viloyat,
+                        COALESCE(SUM(s.jami_summa),0) as savdo,
+                        COUNT(DISTINCT s.id) as savdo_n
+                 FROM users u
+                 LEFT JOIN savdolar s ON s.agent_id=u.telegram_id AND substr(s.created_at,1,7)=?
+                 WHERE u.role IN ('agent','supervisor')
+                 GROUP BY u.telegram_id ORDER BY savdo DESC""",(oy,))
+    by_savdo=c.fetchall()
+    c.execute("""SELECT u.telegram_id,u.name,COUNT(d.id) as dn
+                 FROM users u
+                 LEFT JOIN dokonlar d ON d.agent_id=u.telegram_id AND substr(d.created_at,1,7)=?
+                 WHERE u.role IN ('agent','supervisor')
+                 GROUP BY u.telegram_id ORDER BY dn DESC""",(oy,))
+    by_dokon=c.fetchall()
+    c.execute("""SELECT u.telegram_id,u.name,COALESCE(SUM(p.summa),0) as inkasso
+                 FROM users u
+                 LEFT JOIN pul_olish p ON p.agent_id=u.telegram_id AND substr(p.created_at,1,7)=?
+                 WHERE u.role IN ('agent','supervisor')
+                 GROUP BY u.telegram_id ORDER BY inkasso DESC""",(oy,))
+    by_inkasso=c.fetchall()
+    conn.close()
+    medals=["🥇","🥈","🥉"]
+    def _list(rows, value_idx, fmt_fn):
+        lines=[]
+        for i,r in enumerate(rows[:5]):
+            val=r[value_idx]
+            if val<=0 and i>=3: break
+            med=medals[i] if i<3 else f" {i+1}."
+            lines.append(f"  {med} {r[1]} — {fmt_fn(val)}")
+        return "\n".join(lines) if lines else "  —"
+    text=(f"🏆 OYLIK REYTING\n📅 {oy}\n{'━'*26}\n\n"
+          f"💰 TOP SAVDO:\n{_list(by_savdo,3,fmt)}\n\n"
+          f"🏪 TOP YANGI DOKON OCHUVCHI:\n{_list(by_dokon,2,lambda v: f'{v} ta')}\n\n"
+          f"💵 TOP INKASSO (yig'gan pul):\n{_list(by_inkasso,2,fmt)}\n")
+    # Overall winner = #1 in savdo
+    if by_savdo and by_savdo[0][3]>0:
+        w=by_savdo[0]
+        text+=f"\n{'━'*26}\n🎉 OY G'OLIBI: {w[1]} ({w[2] or '—'})\n💰 {fmt(w[3])} | {w[4]} ta savdo"
+    return text
+
+@bot.message_handler(func=lambda m:m.text=="🏆 Oylik reyting")
+def oylik_reyting(msg):
+    uid=msg.from_user.id
+    if not is_admin(uid): return
+    _send_long(uid,_build_monthly_rating())
+
+def send_monthly_rating_if_last_day():
+    """Cron daily 20:00: if today is last day of month, broadcast rating to all admins+agents."""
+    from calendar import monthrange
+    now=datetime.now()
+    if now.day != monthrange(now.year,now.month)[1]: return
+    text=_build_monthly_rating()
+    # Send to all admins
+    targets=set(all_admin_ids())
+    # And to all agents
+    conn=get_db();c=conn.cursor()
+    c.execute("SELECT telegram_id FROM users WHERE role IN ('agent','supervisor')")
+    for (tid,) in c.fetchall():
+        if tid: targets.add(tid)
+    conn.close()
+    for tid in targets:
+        try: _send_long(tid,text)
+        except: pass
+
 # ───────────── PLAN VS FAKT ─────────────
 def get_agent_plan(agent_id, oy=None):
     """Returns (savdo_plan, dokon_plan) for given month (YYYY-MM)."""
@@ -630,6 +699,7 @@ def main_kb(role):
         kb.add("📄 Dokonlar PDF","📢 Xabar yuborish")
         kb.add("🔁 Repeat hisoboti","⚠️ Yo'qolayotgan dokonlar")
         kb.add("💸 Eski nasiyalar","🎯 Reja boshqaruv")
+        kb.add("🏆 Oylik reyting")
     return kb
 def cancel_kb():
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -3005,14 +3075,16 @@ def run_scheduler():
         schedule.every().day.at("07:00", tz).do(send_today_revisits)
         schedule.every().monday.at("09:00", tz).do(send_weekly_lost_alert)
         schedule.every().monday.at("09:30", tz).do(send_weekly_old_nasiya_alert)
-        print(f"⏰ Scheduler started (TZ={tz}): daily 08:00, revisits 07:00, lost-alert Mon 09:00, old-nasiya Mon 09:30")
+        schedule.every().day.at("20:00", tz).do(send_monthly_rating_if_last_day)
+        print(f"⏰ Scheduler started (TZ={tz}): daily 08:00, revisits 07:00, lost-alert Mon 09:00, old-nasiya Mon 09:30, rating last-day 20:00")
     except TypeError:
         # Old `schedule` lib — convert manually (Tashkent = UTC+5)
         schedule.every().day.at("03:00").do(send_daily_report)   # 08:00 Tashkent
         schedule.every().day.at("02:00").do(send_today_revisits) # 07:00 Tashkent
         schedule.every().monday.at("04:00").do(send_weekly_lost_alert) # 09:00 Tashkent
         schedule.every().monday.at("04:30").do(send_weekly_old_nasiya_alert) # 09:30 Tashkent
-        print("⏰ Scheduler started (UTC fallback): daily 03:00, revisits 02:00, lost-alert Mon 04:00, old-nasiya Mon 04:30 UTC")
+        schedule.every().day.at("15:00").do(send_monthly_rating_if_last_day) # 20:00 Tashkent
+        print("⏰ Scheduler started (UTC fallback): daily 03:00, revisits 02:00, lost-alert Mon 04:00, old-nasiya Mon 04:30, rating 15:00 UTC")
     while True:
         schedule.run_pending()
         time.sleep(30)
