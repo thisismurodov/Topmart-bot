@@ -8,6 +8,21 @@ import threading
 import schedule
 import time
 from datetime import datetime, date, timedelta
+import glob
+
+@bot.message_handler(commands=["backup"])
+def backup_db(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    found = glob.glob("/data/*.db") + glob.glob("*.db") + glob.glob("**/*.db", recursive=True)
+    found = list(dict.fromkeys(found))  # dublikatlarni olib tashlash
+    if not found:
+        bot.reply_to(message, "Hech qanday .db fayl topilmadi.")
+        return
+    for path in found:
+        with open(path, "rb") as f:
+            bot.send_document(message.chat.id, f, visible_file_name=os.path.basename(path))
+    bot.reply_to(message, f"Topildi: {', '.join(found)}")
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or "8968461153:AAETpKpkeupU1XSOa0wEue2QF4MlbmmKMK0"
 _admin_env = os.environ.get("ADMIN_IDS", "").strip()
