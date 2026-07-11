@@ -4205,7 +4205,20 @@ def dokonlar_pdf(msg):
     fname=f"dokonlar_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
     bot.send_document(uid, (fname, buf.read()),
         caption=f"📄 Dokonlar ro'yxati\n🗓 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n📊 Jami: {len(rows)} ta (✓ {faol} faol, ✗ {len(rows)-faol} nofaol)")
+import glob
 
+@bot.message_handler(commands=["backup"])
+def backup_db(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    found = glob.glob("/data/*.db") + glob.glob("*.db")
+    found = list(dict.fromkeys(found))
+    if not found:
+        bot.reply_to(message, "Hech qanday .db fayl topilmadi.")
+        return
+    for path in found:
+        with open(path, "rb") as f:
+            bot.send_document(message.chat.id, f, visible_file_name=os.path.basename(path))
 if __name__=="__main__":
     init_db()
     threading.Thread(target=run_scheduler,daemon=True).start()
