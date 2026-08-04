@@ -1448,15 +1448,12 @@ def reject_cmd(msg):
         bot.send_message(msg.from_user.id,f"🗑 {row[0]} rad etildi va tizimdan o'chirildi.")
     except Exception as e: bot.send_message(msg.from_user.id,f"❗ /reject 123456789\n{e}")
 
-@bot.message_handler(commands=["broadcast"])
+@bot.message_handler(func=lambda m:m.text=="📢 Xabar yuborish")
 def broadcast_start(msg):
-    if not is_admin(msg.from_user.id): return
-    set_state(msg.from_user.id,"broadcast_text",{})
-    bot.send_message(msg.from_user.id,
-        "📢 Barcha faol agentlarga yuboriladigan xabarni yozing.\n\n"
-        "Matn, emoji, har qanday format qabul qilinadi.\n"
-        "Bekor qilish uchun: ❌ Bekor qilish",
-        reply_markup=cancel_kb())
+    uid=msg.from_user.id
+    if not is_admin(uid): return
+    set_state(uid,"broadcast_audience",{})
+    bot.send_message(uid,"📢 Kimga yubormoqchisiz?",reply_markup=_broadcast_audience_kb())
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="broadcast_text")
 def broadcast_text_h(msg):
@@ -1941,7 +1938,45 @@ def _delivery_today_dokon_kb(uid):
     kb.add("❌ Bekor qilish")
     return kb,len(rows),added,"ok"
 
+def _dokon_page_kb(uid, page=0, query=None, faol_only=True, extra_buttons=None, row_width=2):
+    """Universal dokon picker: pagination (KB_MAX_DOKON per page) + optional name search.
+    Returns (kb, total, shown, page)."""
+    conn=get_db();c=conn.cursor()
+    where="1=1"; params=[]
+    if faol_only:
+        where+=" AND holat='faol'"
+    if not is_admin(uid):
+        where+=" AND agent_id=?"; params.append(uid)
+    if query:
+        where+=" AND nomi LIKE ? COLLATE NOCASE"; params.append(f"%{query}%")
+    c.execute(f"SELECT COUNT(*) FROM dokonlar WHERE {where}",params)
+    total=c.fetchone()[0]
+    max_page=max(0,(total-1)//KB_MAX_DOKON)
+    page=max(0,min(page,max_page))
+    c.execute(f"""SELECT id,nomi FROM dokonlar WHERE {where}
+                  ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?""",
+              params+[KB_MAX_DOKON,page*KB_MAX_DOKON])
+    rows=c.fetchall(); conn.close()
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=row_width)
+    if row_width==2:
+        pair=[]
+        for d in rows:
+            pair.append(f"🏪 {d[0]}||{d[1]}")
+            if len(pair)==2: kb.add(*pair); pair=[]
+        if pair: kb.add(*pair)
+    else:
+        for d in rows: kb.add(f"🏪 {d[0]}||{d[1]}")
+    nav=[]
+    if page>0: nav.append(BTN_PREV_PAGE)
+    if (page+1)*KB_MAX_DOKON<total: nav.append(BTN_NEXT_PAGE)
+    if nav: kb.add(*nav)
+    for b in (extra_buttons or []): kb.add(b)
+    kb.add("❌ Bekor qilish")
+    return kb, total, len(rows), page
+
 KB_MAX_DOKON=40  # Telegram reply keyboard limiti oshmasligi uchun
+BTN_NEXT_PAGE="➡️ Keyingi 40 ta"
+BTN_PREV_PAGE="⬅️ Oldingi 40 ta"
 
 def _dokon_search(uid, q):
     """Search active dokons by name (scoped by role), newest first."""
@@ -1968,23 +2003,8 @@ def _dokon_search_reply(uid, q, extra_button=None):
 
 def _bosh_dokon_kb(uid):
     """For bosh agent: list dokons ordered by created_at DESC (newest first), 2 columns."""
-    conn=get_db();c=conn.cursor()
-    if is_admin(uid):
-        c.execute("""SELECT id,nomi FROM dokonlar
-                     WHERE holat='faol' ORDER BY created_at DESC, id DESC LIMIT ?""",(KB_MAX_DOKON,))
-    else:
-        c.execute("""SELECT id,nomi FROM dokonlar
-                     WHERE agent_id=? AND holat='faol'
-                     ORDER BY created_at DESC, id DESC LIMIT ?""",(uid,KB_MAX_DOKON))
-    rows=c.fetchall(); conn.close()
-    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
-    pair=[]
-    for d in rows:
-        pair.append(f"🏪 {d[0]}||{d[1]}")
-        if len(pair)==2: kb.add(*pair); pair=[]
-    if pair: kb.add(*pair)
-    kb.add("❌ Bekor qilish")
-    return kb, len(rows)
+    kb,total,shown,page=_dokon_page_kb(uid,page=0)
+    return kb, total, shown, page
 
 def _viloyat_kb(uid):
     """Build viloyat-picker keyboard + recent 5 dokon shortcuts."""
@@ -2081,23 +2101,17 @@ def tovar_berish(msg):
                 f"🏪 Dokonni tanlang:",
                 reply_markup=kb)
         return
-    kb,n=_bosh_dokon_kb(uid)
-    if n==0: bot.send_message(uid,"❗ Faol dokon yo'q."); return
-    set_state(uid,"savdo_dokon",{"mahsulotlar":mahsulotlar,"tanlangan":{}})
-    bot.send_message(uid,
-        f"🏪 DOKONNI TANLANG\n\n"
-        f"🆕 Oxirgi qo'shilgan {n} ta dokon tugmalarda.\n"
-        f"🔎 Boshqa dokon kerakmi? Nomini (bir qismini) yozib yuboring — qidirib beraman.",
-        reply_markup=kb)
+    kb,total,shown,page=_bosh_dokon_kb(uid)
+    if total==0: bot.send_message(uid,"❗ Faol dokon yo'q."); return
+    set_state(uid,"savdo_dokon",{"mahsulotlar":mahsulotlar,"tanlangan":{},"dokon_page":page})
+    bot.send_message(uid,_dokon_page_text(total,shown,page),reply_markup=kb)
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="savdo_dokon")
 def s_savdo_dokon(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
     txt=(msg.text or "").strip()
     if not (txt.startswith("🏪 ") and "||" in txt):
-        user=get_user(uid)
-        if txt and not txt.startswith(("➕","🚫","❌","✅")) and len(txt)>=2 and user and user[3]!="delivery":
-            _dokon_search_reply(uid,txt)
+        _dokon_picker_nav(uid,txt,data,"savdo_dokon")
         return
     try:
         did,dnomi=txt.replace("🏪 ","").split("||",1)
@@ -2380,26 +2394,16 @@ def pul_olish(msg):
     uid=msg.from_user.id; user=get_user(uid)
     if not user: return
     if check_pending(uid): return
-    conn=get_db();c=conn.cursor()
-    if is_admin(uid):
-        c.execute("SELECT id,nomi FROM dokonlar WHERE holat='faol' ORDER BY created_at DESC, id DESC LIMIT ?",(KB_MAX_DOKON,))
-    else:
-        c.execute("SELECT id,nomi FROM dokonlar WHERE agent_id=? AND holat='faol' ORDER BY created_at DESC, id DESC LIMIT ?",(uid,KB_MAX_DOKON))
-    dokonlar=c.fetchall(); conn.close()
-    if not dokonlar: bot.send_message(uid,"❗ Faol dokon yo'q."); return
-    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
-    for d in dokonlar: kb.add(f"🏪 {d[0]}||{d[1]}")
-    kb.add("❌ Bekor qilish")
-    set_state(uid,"pul_dokon",{})
-    bot.send_message(uid,"🏪 Dokonni tanlang.\n🔎 Ro'yxatda yo'q bo'lsa, nomini yozib yuboring — qidirib beraman:",reply_markup=kb)
+    kb,total,shown,page=_dokon_page_kb(uid,page=0,row_width=1)
+    if total==0: bot.send_message(uid,"❗ Faol dokon yo'q."); return
+    set_state(uid,"pul_dokon",{"dokon_page":page})
+    bot.send_message(uid,_dokon_page_text(total,shown,page),reply_markup=kb)
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="pul_dokon")
 def s_pul_dokon(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
     if not msg.text.startswith("🏪 "):
-        txt=(msg.text or "").strip()
-        if txt and not txt.startswith(("➕","🚫","❌","✅","🆕")) and len(txt)>=2:
-            _dokon_search_reply(uid,txt)
+        _dokon_picker_nav(uid,msg.text,data,"pul_dokon",row_width=1)
         return
     try:
         did,dnomi=msg.text.replace("🏪 ","").split("||",1)
@@ -2778,16 +2782,11 @@ def tovar_olmadi(msg):
         kb.add("❌ Bekor qilish")
         set_state(uid,"olmadi_dokon",{})
         bot.send_message(uid,f"🚚 BUGUN — {day_name(kun)}\n🏪 Qaysi dokon tovar olmadi?",reply_markup=kb); return
-    if is_admin(uid):
-        c.execute("SELECT id,nomi FROM dokonlar ORDER BY created_at DESC, id DESC LIMIT ?",(KB_MAX_DOKON,))
-    else:
-        c.execute("SELECT id,nomi FROM dokonlar WHERE agent_id=? ORDER BY created_at DESC, id DESC LIMIT ?",(uid,KB_MAX_DOKON))
-    dokonlar=c.fetchall(); conn.close()
-    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
-    for d in dokonlar: kb.add(f"🏪 {d[0]}||{d[1]}")
-    kb.add("🆕 Yangi dokon (olmagan)"); kb.add("❌ Bekor qilish")
-    set_state(uid,"olmadi_dokon",{})
-    bot.send_message(uid,"🏪 Dokonni tanlang.\n🔎 Ro'yxatda yo'q bo'lsa, nomini yozib yuboring — qidirib beraman:",reply_markup=kb)
+    conn.close()
+    kb,total,shown,page=_dokon_page_kb(uid,page=0,faol_only=False,
+                                       extra_buttons=["🆕 Yangi dokon (olmagan)"],row_width=1)
+    set_state(uid,"olmadi_dokon",{"dokon_page":page})
+    bot.send_message(uid,_dokon_page_text(total,shown,page),reply_markup=kb)
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="olmadi_dokon")
 def s_olmadi_dokon(msg):
@@ -2796,10 +2795,8 @@ def s_olmadi_dokon(msg):
         set_state(uid,"olmadi_yangi_nomi",data)
         bot.send_message(uid,"Dokon nomini kiriting:",reply_markup=cancel_kb()); return
     if not msg.text.startswith("🏪 "):
-        txt=(msg.text or "").strip()
-        user=get_user(uid)
-        if txt and not txt.startswith(("➕","🚫","❌","✅","🆕")) and len(txt)>=2 and user and user[3]!="delivery":
-            _dokon_search_reply(uid,txt,extra_button="🆕 Yangi dokon (olmagan)")
+        _dokon_picker_nav(uid,msg.text,data,"olmadi_dokon",faol_only=False,
+                          extra_buttons=["🆕 Yangi dokon (olmagan)"],row_width=1)
         return
     try:
         did,dnomi=msg.text.replace("🏪 ","").split("||",1)
@@ -4236,3 +4233,39 @@ if __name__=="__main__":
     threading.Thread(target=run_health_server,daemon=True).start()
     print("✅ TOP MART bot ishga tushdi!")
     bot.infinity_polling(timeout=30, long_polling_timeout=30)
+
+def _dokon_picker_nav(uid, msg_text, data, state_name, faol_only=True, extra_buttons=None, row_width=2):
+    """Handle pagination/search input inside a dokon-picker state.
+    Returns True if the message was consumed (keyboard re-sent)."""
+    txt=(msg_text or "").strip()
+    if txt.startswith("🏪 ") and "||" in txt: return False
+    u=get_user(uid)
+    if u and u[3]=="delivery": return False  # delivery uses route keyboard, not this picker
+    page=data.get("dokon_page",0); query=data.get("dokon_query")
+    if txt==BTN_NEXT_PAGE: page+=1
+    elif txt==BTN_PREV_PAGE: page=max(0,page-1)
+    elif txt and not txt.startswith(("❌","🆕","⬅️","➡️")):
+        # Treat any other typed text as a search query
+        query=txt; page=0
+    else:
+        return False
+    data["dokon_page"]=page; data["dokon_query"]=query
+    set_state(uid,state_name,data)
+    kb,total,shown,page=_dokon_page_kb(uid,page=page,query=query,faol_only=faol_only,
+                                       extra_buttons=extra_buttons,row_width=row_width)
+    data["dokon_page"]=page
+    if total==0:
+        bot.send_message(uid,f"❗ \"{query}\" bo'yicha dokon topilmadi. Boshqa nom yozing:",reply_markup=kb)
+    else:
+        bot.send_message(uid,_dokon_page_text(total,shown,page,query),reply_markup=kb)
+    return True
+
+def _dokon_page_text(total, shown, page, query=None):
+    """Header text for the dokon picker."""
+    t=f"🏪 DOKONNI TANLANG ({total} ta"
+    if query: t+=f", qidiruv: \"{query}\""
+    t+=")\n"
+    if total>KB_MAX_DOKON:
+        t+=f"📄 Sahifa {page+1}/{(total-1)//KB_MAX_DOKON+1} — {shown} ta ko'rsatildi\n"
+    t+="\n🆕 Oxirgi qo'shilganlar tepada\n🔍 Qidirish uchun dokon nomini (bir qismini) yozing"
+    return t
