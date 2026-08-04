@@ -183,7 +183,46 @@ def init_db():
     except: pass
     conn.commit(); conn.close()
 
-def get_db(): return sqlite3.connect(DB_PATH)
+def _norm_text(s):
+    """Imlo-chidamli normalizatsiya: kichik harf, apostrof/harf variantlarini tenglashtirish.
+    "Do'kon"/"dokon"/"doʻkon" → bir xil ko'rinish."""
+    if s is None: return ""
+    s=str(s).lower()
+    # Apostrof va o'xshash belgilarni olib tashlash (o' → o, g' → g)
+    for ch in ("'","`","ʻ","ʼ","’","‘","´","ʹ","-"):
+        s=s.replace(ch,"")
+    # Kirill → lotin asosiy harflar (aralash yozuvlar uchun)
+    cyr={"а":"a","б":"b","в":"v","г":"g","д":"d","е":"e","ё":"yo","ж":"j","з":"z",
+         "и":"i","й":"y","к":"k","л":"l","м":"m","н":"n","о":"o","п":"p","р":"r",
+         "с":"s","т":"t","у":"u","ф":"f","х":"x","ц":"s","ч":"ch","ш":"sh",
+         "ъ":"","ь":"","э":"e","ю":"yu","я":"ya","қ":"q","ғ":"g","ҳ":"h","ў":"o"}
+    s="".join(cyr.get(ch,ch) for ch in s)
+    # Harf variantlari: x/h ni tenglashtirish
+    s=s.replace("x","h")
+    # Bo'shliqlarni siqish
+    s=" ".join(s.split())
+    return s
+
+def get_db():
+    conn=sqlite3.connect(DB_PATH)
+    try: conn.create_function("norm",1,_norm_text)
+    except Exception: pass
+    return conn
+
+def _dokon_suggestions(uid_scope_rows, q, limit=5):
+    """Bo'sh natijada yaqin nom variantlarini topish (difflib).
+    uid_scope_rows: [(id,nomi),...] — foydalanuvchi ko'ra oladigan dokonlar."""
+    import difflib
+    nq=_norm_text(q)
+    scored=[]
+    for did,nomi in uid_scope_rows:
+        nn=_norm_text(nomi)
+        r=difflib.SequenceMatcher(None,nq,nn).ratio()
+        # qisman moslik ham hisobga olinadi
+        if nq and (nq in nn or nn in nq): r=max(r,0.75)
+        if r>=0.55: scored.append((r,did,nomi))
+    scored.sort(reverse=True)
+    return [(did,nomi) for _,did,nomi in scored[:limit]]
 user_state = {}
 def set_state(uid,s,d=None): user_state[uid]={"state":s,"data":d or {}}
 def get_state(uid): return user_state.get(uid,{"state":None,"data":{}})
@@ -1948,7 +1987,7 @@ def _dokon_page_kb(uid, page=0, query=None, faol_only=True, extra_buttons=None, 
     if not is_admin(uid):
         where+=" AND agent_id=?"; params.append(uid)
     if query:
-        where+=" AND nomi LIKE ? COLLATE NOCASE"; params.append(f"%{query}%")
+        where+=" AND norm(nomi) LIKE ?"; params.append(f"%{_norm_text(query)}%")
     c.execute(f"SELECT COUNT(*) FROM dokonlar WHERE {where}",params)
     total=c.fetchone()[0]
     max_page=max(0,(total-1)//KB_MAX_DOKON)
@@ -1983,10 +2022,15 @@ def _dokon_search(uid, q):
     conn=get_db();c=conn.cursor()
     extra,params=_scope_clause(uid)
     c.execute(f"""SELECT id,nomi FROM dokonlar
-                  WHERE holat='faol' AND nomi LIKE ?{extra}
+                  WHERE holat='faol' AND norm(nomi) LIKE ?{extra}
                   ORDER BY created_at DESC, id DESC LIMIT ?""",
-              (f"%{q}%",)+params+(KB_MAX_DOKON,))
-    rows=c.fetchall(); conn.close(); return rows
+              (f"%{_norm_text(q)}%",)+params+(KB_MAX_DOKON,))
+    rows=c.fetchall()
+    if not rows:
+        # Yaqin variantlarni taklif qilish
+        c.execute(f"""SELECT id,nomi FROM dokonlar WHERE holat='faol'{extra}""",params)
+        rows=_dokon_suggestions(c.fetchall(),q)
+    conn.close(); return rows
 
 def _dokon_search_reply(uid, q, extra_button=None):
     """Send search results as keyboard. Returns True if handled."""
@@ -2005,71 +2049,6 @@ def _bosh_dokon_kb(uid):
     """For bosh agent: list dokons ordered by created_at DESC (newest first), 2 columns."""
     kb,total,shown,page=_dokon_page_kb(uid,page=0)
     return kb, total, shown, page
-
-def _viloyat_kb(uid):
-    """Build viloyat-picker keyboard + recent 5 dokon shortcuts."""
-    conn=get_db();c=conn.cursor()
-    extra,params=_scope_clause(uid)
-    # Recent 5 dokons
-    if is_admin(uid):
-        c.execute("""SELECT d.id,d.nomi FROM dokonlar d
-                     JOIN savdolar s ON s.dokon_id=d.id
-                     WHERE d.holat='faol'
-                     GROUP BY d.id ORDER BY MAX(s.created_at) DESC LIMIT 5""")
-    else:
-        c.execute("""SELECT d.id,d.nomi FROM dokonlar d
-                     JOIN savdolar s ON s.dokon_id=d.id
-                     WHERE d.agent_id=? AND d.holat='faol'
-                     GROUP BY d.id ORDER BY MAX(s.created_at) DESC LIMIT 5""",(uid,))
-    recent=c.fetchall()
-    # Distinct viloyats with counts
-    c.execute(f"""SELECT COALESCE(NULLIF(viloyat,''),'— Noma''lum') as v, COUNT(*) as n
-                  FROM dokonlar WHERE holat='faol'{extra}
-                  GROUP BY v ORDER BY n DESC""",params)
-    vils=c.fetchall(); conn.close()
-    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
-    if recent:
-        for d in recent: kb.add(f"🏪 {d[0]}||{d[1]}")
-    if vils:
-        row=[]
-        for v,n in vils:
-            row.append(f"📍 {v} ({n})")
-            if len(row)==2: kb.add(*row); row=[]
-        if row: kb.add(*row)
-    kb.add("❌ Bekor qilish")
-    return kb, len(vils), len(recent)
-
-def _hudud_kb(uid, viloyat):
-    """List hududs within a viloyat."""
-    conn=get_db();c=conn.cursor()
-    extra,params=_scope_clause(uid)
-    vil_clause="(viloyat=? OR (viloyat IS NULL AND ?='— Noma''lum') OR (viloyat='' AND ?='— Noma''lum'))"
-    c.execute(f"""SELECT COALESCE(NULLIF(hudud,''),'— Noma''lum') as h, COUNT(*) as n
-                  FROM dokonlar WHERE holat='faol' AND {vil_clause}{extra}
-                  GROUP BY h ORDER BY n DESC""",(viloyat,viloyat,viloyat)+params)
-    huds=c.fetchall(); conn.close()
-    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
-    row=[]
-    for h,n in huds:
-        row.append(f"🏘 {h} ({n})")
-        if len(row)==2: kb.add(*row); row=[]
-    if row: kb.add(*row)
-    kb.add("⬅️ Viloyatga qaytish","❌ Bekor qilish")
-    return kb, len(huds)
-
-def _dokon_in_hudud_kb(uid, viloyat, hudud):
-    conn=get_db();c=conn.cursor()
-    extra,params=_scope_clause(uid)
-    vil_clause="(viloyat=? OR (viloyat IS NULL AND ?='— Noma''lum') OR (viloyat='' AND ?='— Noma''lum'))"
-    hud_clause="(hudud=? OR (hudud IS NULL AND ?='— Noma''lum') OR (hudud='' AND ?='— Noma''lum'))"
-    c.execute(f"""SELECT id,nomi FROM dokonlar
-                  WHERE holat='faol' AND {vil_clause} AND {hud_clause}{extra}
-                  ORDER BY nomi LIMIT ?""",(viloyat,viloyat,viloyat,hudud,hudud,hudud)+params+(KB_MAX_DOKON,))
-    rows=c.fetchall(); conn.close()
-    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
-    for d in rows: kb.add(f"🏪 {d[0]}||{d[1]}")
-    kb.add("⬅️ Hududga qaytish","❌ Bekor qilish")
-    return kb, len(rows)
 
 @bot.message_handler(func=lambda m:m.text=="📦 Tovar berish")
 def tovar_berish(msg):
@@ -2989,19 +2968,41 @@ def qidiruv_query(msg):
         bot.send_message(uid,"❗ Kamida 2 ta belgi kiriting."); return
     user=get_user(uid); role=user[3]
     conn=get_db();c=conn.cursor()
-    like=f"%{q}%"
+    nlike=f"%{_norm_text(q)}%"; like=f"%{q}%"
     if role=="admin":
         c.execute("""SELECT id,nomi,egasi,viloyat,holat FROM dokonlar
-                     WHERE nomi LIKE ? OR egasi LIKE ? OR telefon LIKE ?
-                     ORDER BY nomi LIMIT 50""",(like,like,like))
+                     WHERE norm(nomi) LIKE ? OR norm(egasi) LIKE ? OR telefon LIKE ?
+                     ORDER BY nomi LIMIT 50""",(nlike,nlike,like))
     else:
         c.execute("""SELECT id,nomi,egasi,viloyat,holat FROM dokonlar
-                     WHERE agent_id=? AND (nomi LIKE ? OR egasi LIKE ? OR telefon LIKE ?)
-                     ORDER BY nomi LIMIT 50""",(uid,like,like,like))
-    rows=c.fetchall(); conn.close()
+                     WHERE agent_id=? AND (norm(nomi) LIKE ? OR norm(egasi) LIKE ? OR telefon LIKE ?)
+                     ORDER BY nomi LIMIT 50""",(uid,nlike,nlike,like))
+    rows=c.fetchall()
     if not rows:
+        # Yaqin variantlarni taklif qilish (imlo xatolariga chidamli)
+        if role=="admin":
+            c.execute("SELECT id,nomi FROM dokonlar")
+        else:
+            c.execute("SELECT id,nomi FROM dokonlar WHERE agent_id=?",(uid,))
+        sugg=_dokon_suggestions(c.fetchall(),q)
+        if sugg:
+            ids=tuple(d for d,_ in sugg)
+            c.execute(f"""SELECT id,nomi,egasi,viloyat,holat FROM dokonlar
+                          WHERE id IN ({','.join('?'*len(ids))})""",ids)
+            rows=c.fetchall()
+            conn.close()
+            kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+            for d in rows:
+                icon="✅" if d[4]=="faol" else "❌"
+                kb.add(f"🏪{d[0]}||{d[1]} ({d[3] or '—'}) {icon}")
+            kb.add("❌ Bekor qilish")
+            set_state(uid,"admin_dokon_list" if role=="admin" else "agent_dokon_search_list",{})
+            bot.send_message(uid,f"❓ '{q}' aniq topilmadi. Balki shulardan birini nazarda tutgandirsiz:",reply_markup=kb)
+            return
+        conn.close()
         bot.send_message(uid,f"❌ '{q}' bo'yicha hech narsa topilmadi.",reply_markup=main_kb(role)); 
         set_state(uid,None,{}); return
+    conn.close()
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
     for d in rows:
         icon="✅" if d[4]=="faol" else "❌"
@@ -4227,13 +4228,6 @@ def dokonlar_pdf(msg):
     bot.send_document(uid, (fname, buf.read()),
         caption=f"📄 Dokonlar ro'yxati\n🗓 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n📊 Jami: {len(rows)} ta (✓ {faol} faol, ✗ {len(rows)-faol} nofaol)")
 
-if __name__=="__main__":
-    init_db()
-    threading.Thread(target=run_scheduler,daemon=True).start()
-    threading.Thread(target=run_health_server,daemon=True).start()
-    print("✅ TOP MART bot ishga tushdi!")
-    bot.infinity_polling(timeout=30, long_polling_timeout=30)
-
 def _dokon_picker_nav(uid, msg_text, data, state_name, faol_only=True, extra_buttons=None, row_width=2):
     """Handle pagination/search input inside a dokon-picker state.
     Returns True if the message was consumed (keyboard re-sent)."""
@@ -4269,3 +4263,10 @@ def _dokon_page_text(total, shown, page, query=None):
         t+=f"📄 Sahifa {page+1}/{(total-1)//KB_MAX_DOKON+1} — {shown} ta ko'rsatildi\n"
     t+="\n🆕 Oxirgi qo'shilganlar tepada\n🔍 Qidirish uchun dokon nomini (bir qismini) yozing"
     return t
+
+if __name__=="__main__":
+    init_db()
+    threading.Thread(target=run_scheduler,daemon=True).start()
+    threading.Thread(target=run_health_server,daemon=True).start()
+    print("✅ TOP MART bot ishga tushdi!")
+    bot.infinity_polling(timeout=30, long_polling_timeout=30)
