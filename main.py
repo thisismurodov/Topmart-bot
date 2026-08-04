@@ -1941,16 +1941,18 @@ def _delivery_today_dokon_kb(uid):
     kb.add("❌ Bekor qilish")
     return kb,len(rows),added,"ok"
 
+KB_MAX_DOKON=40  # Telegram reply keyboard limiti oshmasligi uchun
+
 def _bosh_dokon_kb(uid):
     """For bosh agent: list dokons ordered by created_at DESC (newest first), 2 columns."""
     conn=get_db();c=conn.cursor()
     if is_admin(uid):
         c.execute("""SELECT id,nomi FROM dokonlar
-                     WHERE holat='faol' ORDER BY created_at DESC, id DESC""")
+                     WHERE holat='faol' ORDER BY created_at DESC, id DESC LIMIT ?""",(KB_MAX_DOKON,))
     else:
         c.execute("""SELECT id,nomi FROM dokonlar
                      WHERE agent_id=? AND holat='faol'
-                     ORDER BY created_at DESC, id DESC""",(uid,))
+                     ORDER BY created_at DESC, id DESC LIMIT ?""",(uid,KB_MAX_DOKON))
     rows=c.fetchall(); conn.close()
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
     pair=[]
@@ -2019,7 +2021,7 @@ def _dokon_in_hudud_kb(uid, viloyat, hudud):
     hud_clause="(hudud=? OR (hudud IS NULL AND ?='— Noma''lum') OR (hudud='' AND ?='— Noma''lum'))"
     c.execute(f"""SELECT id,nomi FROM dokonlar
                   WHERE holat='faol' AND {vil_clause} AND {hud_clause}{extra}
-                  ORDER BY nomi""",(viloyat,viloyat,viloyat,hudud,hudud,hudud)+params)
+                  ORDER BY nomi LIMIT ?""",(viloyat,viloyat,viloyat,hudud,hudud,hudud)+params+(KB_MAX_DOKON,))
     rows=c.fetchall(); conn.close()
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
     for d in rows: kb.add(f"🏪 {d[0]}||{d[1]}")
@@ -2352,9 +2354,9 @@ def pul_olish(msg):
     if check_pending(uid): return
     conn=get_db();c=conn.cursor()
     if is_admin(uid):
-        c.execute("SELECT id,nomi FROM dokonlar WHERE holat='faol' ORDER BY nomi")
+        c.execute("SELECT id,nomi FROM dokonlar WHERE holat='faol' ORDER BY created_at DESC, id DESC LIMIT ?",(KB_MAX_DOKON,))
     else:
-        c.execute("SELECT id,nomi FROM dokonlar WHERE agent_id=? AND holat='faol' ORDER BY nomi",(uid,))
+        c.execute("SELECT id,nomi FROM dokonlar WHERE agent_id=? AND holat='faol' ORDER BY created_at DESC, id DESC LIMIT ?",(uid,KB_MAX_DOKON))
     dokonlar=c.fetchall(); conn.close()
     if not dokonlar: bot.send_message(uid,"❗ Faol dokon yo'q."); return
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
@@ -2745,9 +2747,9 @@ def tovar_olmadi(msg):
         set_state(uid,"olmadi_dokon",{})
         bot.send_message(uid,f"🚚 BUGUN — {day_name(kun)}\n🏪 Qaysi dokon tovar olmadi?",reply_markup=kb); return
     if is_admin(uid):
-        c.execute("SELECT id,nomi FROM dokonlar ORDER BY nomi")
+        c.execute("SELECT id,nomi FROM dokonlar ORDER BY created_at DESC, id DESC LIMIT ?",(KB_MAX_DOKON,))
     else:
-        c.execute("SELECT id,nomi FROM dokonlar WHERE agent_id=? ORDER BY nomi",(uid,))
+        c.execute("SELECT id,nomi FROM dokonlar WHERE agent_id=? ORDER BY created_at DESC, id DESC LIMIT ?",(uid,KB_MAX_DOKON))
     dokonlar=c.fetchall(); conn.close()
     kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
     for d in dokonlar: kb.add(f"🏪 {d[0]}||{d[1]}")
@@ -4190,20 +4192,7 @@ def dokonlar_pdf(msg):
     fname=f"dokonlar_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
     bot.send_document(uid, (fname, buf.read()),
         caption=f"📄 Dokonlar ro'yxati\n🗓 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n📊 Jami: {len(rows)} ta (✓ {faol} faol, ✗ {len(rows)-faol} nofaol)")
-import glob
 
-@bot.message_handler(commands=["backup"])
-def backup_db(message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    found = glob.glob("/data/*.db") + glob.glob("*.db")
-    found = list(dict.fromkeys(found))
-    if not found:
-        bot.reply_to(message, "Hech qanday .db fayl topilmadi.")
-        return
-    for path in found:
-        with open(path, "rb") as f:
-            bot.send_document(message.chat.id, f, visible_file_name=os.path.basename(path))
 if __name__=="__main__":
     init_db()
     threading.Thread(target=run_scheduler,daemon=True).start()
