@@ -1943,6 +1943,29 @@ def _delivery_today_dokon_kb(uid):
 
 KB_MAX_DOKON=40  # Telegram reply keyboard limiti oshmasligi uchun
 
+def _dokon_search(uid, q):
+    """Search active dokons by name (scoped by role), newest first."""
+    conn=get_db();c=conn.cursor()
+    extra,params=_scope_clause(uid)
+    c.execute(f"""SELECT id,nomi FROM dokonlar
+                  WHERE holat='faol' AND nomi LIKE ?{extra}
+                  ORDER BY created_at DESC, id DESC LIMIT ?""",
+              (f"%{q}%",)+params+(KB_MAX_DOKON,))
+    rows=c.fetchall(); conn.close(); return rows
+
+def _dokon_search_reply(uid, q, extra_button=None):
+    """Send search results as keyboard. Returns True if handled."""
+    rows=_dokon_search(uid,q)
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=1)
+    for d in rows: kb.add(f"🏪 {d[0]}||{d[1]}")
+    if extra_button: kb.add(extra_button)
+    kb.add("❌ Bekor qilish")
+    if rows:
+        bot.send_message(uid,f"🔎 \"{q}\" bo'yicha {len(rows)} ta dokon topildi:",reply_markup=kb)
+    else:
+        bot.send_message(uid,f"🔎 \"{q}\" bo'yicha dokon topilmadi.\nBoshqa nom yozib qidiring:",reply_markup=kb)
+    return True
+
 def _bosh_dokon_kb(uid):
     """For bosh agent: list dokons ordered by created_at DESC (newest first), 2 columns."""
     conn=get_db();c=conn.cursor()
@@ -2062,15 +2085,20 @@ def tovar_berish(msg):
     if n==0: bot.send_message(uid,"❗ Faol dokon yo'q."); return
     set_state(uid,"savdo_dokon",{"mahsulotlar":mahsulotlar,"tanlangan":{}})
     bot.send_message(uid,
-        f"🏪 DOKONNI TANLANG ({n} ta faol)\n\n"
-        f"🆕 Oxirgi qo'shilganlar tepada:",
+        f"🏪 DOKONNI TANLANG\n\n"
+        f"🆕 Oxirgi qo'shilgan {n} ta dokon tugmalarda.\n"
+        f"🔎 Boshqa dokon kerakmi? Nomini (bir qismini) yozib yuboring — qidirib beraman.",
         reply_markup=kb)
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="savdo_dokon")
 def s_savdo_dokon(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
     txt=(msg.text or "").strip()
-    if not (txt.startswith("🏪 ") and "||" in txt): return
+    if not (txt.startswith("🏪 ") and "||" in txt):
+        user=get_user(uid)
+        if txt and not txt.startswith(("➕","🚫","❌","✅")) and len(txt)>=2 and user and user[3]!="delivery":
+            _dokon_search_reply(uid,txt)
+        return
     try:
         did,dnomi=txt.replace("🏪 ","").split("||",1)
         data["dokon_id"]=int(did); data["dokon_nomi"]=dnomi
@@ -2363,12 +2391,16 @@ def pul_olish(msg):
     for d in dokonlar: kb.add(f"🏪 {d[0]}||{d[1]}")
     kb.add("❌ Bekor qilish")
     set_state(uid,"pul_dokon",{})
-    bot.send_message(uid,"🏪 Dokonni tanlang:",reply_markup=kb)
+    bot.send_message(uid,"🏪 Dokonni tanlang.\n🔎 Ro'yxatda yo'q bo'lsa, nomini yozib yuboring — qidirib beraman:",reply_markup=kb)
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="pul_dokon")
 def s_pul_dokon(msg):
     uid=msg.from_user.id; data=get_state(uid)["data"]
-    if not msg.text.startswith("🏪 "): return
+    if not msg.text.startswith("🏪 "):
+        txt=(msg.text or "").strip()
+        if txt and not txt.startswith(("➕","🚫","❌","✅","🆕")) and len(txt)>=2:
+            _dokon_search_reply(uid,txt)
+        return
     try:
         did,dnomi=msg.text.replace("🏪 ","").split("||",1)
         data["dokon_id"]=int(did); data["dokon_nomi"]=dnomi
@@ -2755,7 +2787,7 @@ def tovar_olmadi(msg):
     for d in dokonlar: kb.add(f"🏪 {d[0]}||{d[1]}")
     kb.add("🆕 Yangi dokon (olmagan)"); kb.add("❌ Bekor qilish")
     set_state(uid,"olmadi_dokon",{})
-    bot.send_message(uid,"🏪 Dokonni tanlang:",reply_markup=kb)
+    bot.send_message(uid,"🏪 Dokonni tanlang.\n🔎 Ro'yxatda yo'q bo'lsa, nomini yozib yuboring — qidirib beraman:",reply_markup=kb)
 
 @bot.message_handler(func=lambda m:get_state(m.from_user.id)["state"]=="olmadi_dokon")
 def s_olmadi_dokon(msg):
@@ -2763,7 +2795,12 @@ def s_olmadi_dokon(msg):
     if msg.text=="🆕 Yangi dokon (olmagan)":
         set_state(uid,"olmadi_yangi_nomi",data)
         bot.send_message(uid,"Dokon nomini kiriting:",reply_markup=cancel_kb()); return
-    if not msg.text.startswith("🏪 "): return
+    if not msg.text.startswith("🏪 "):
+        txt=(msg.text or "").strip()
+        user=get_user(uid)
+        if txt and not txt.startswith(("➕","🚫","❌","✅","🆕")) and len(txt)>=2 and user and user[3]!="delivery":
+            _dokon_search_reply(uid,txt,extra_button="🆕 Yangi dokon (olmagan)")
+        return
     try:
         did,dnomi=msg.text.replace("🏪 ","").split("||",1)
         data["dokon_id"]=int(did); data["dokon_nomi"]=dnomi
